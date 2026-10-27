@@ -51,6 +51,7 @@ fn collapsed_workspace_pins_the_open_session() {
         &HashSet::new(),
         &active,
         &HashSet::new(),
+        &HashSet::new(),
     );
     let visible = session_row_paths(&rows, &sessions);
     assert!(
@@ -97,6 +98,7 @@ fn collapsed_workspace_keeps_a_running_session_visible() {
         &HashSet::new(),
         &None,
         &running,
+        &HashSet::new(),
     );
     let visible = session_row_paths(&rows, &sessions);
     assert!(
@@ -128,6 +130,7 @@ fn collapsed_workspace_without_the_open_session_stays_closed() {
         &HashSet::new(),
         &active,
         &HashSet::new(),
+        &HashSet::new(),
     );
     assert!(
         !session_row_paths(&rows, &sessions).contains(&sessions[1].path),
@@ -157,6 +160,7 @@ fn manually_collapsed_working_workspace_pins_the_open_session() {
         &HashMap::new(),
         &HashSet::new(),
         &active,
+        &HashSet::new(),
         &HashSet::new(),
     );
     let visible = session_row_paths(&rows, &sessions);
@@ -190,6 +194,7 @@ fn unlisted_workspace_stays_out_of_the_sidebar() {
         &HashSet::new(),
         &None,
         &HashSet::new(),
+        &HashSet::new(),
     );
     assert!(
         !rows
@@ -219,6 +224,7 @@ fn listed_workspace_without_sessions_gets_a_header() {
         &HashMap::new(),
         &HashSet::new(),
         &None,
+        &HashSet::new(),
         &HashSet::new(),
     );
     assert!(
@@ -250,6 +256,7 @@ fn groups_follow_the_project_list_order() {
         &HashMap::new(),
         &HashSet::new(),
         &None,
+        &HashSet::new(),
         &HashSet::new(),
     );
     let labels: Vec<&str> = rows
@@ -285,6 +292,7 @@ fn pinned_sessions_lead_their_group_and_beat_truncation() {
         &pinned,
         &None,
         &HashSet::new(),
+        &HashSet::new(),
     );
     let visible = session_row_paths(&rows, &sessions);
     assert_eq!(visible.first(), Some(&oldest), "the pin leads the group");
@@ -297,6 +305,42 @@ fn pinned_sessions_lead_their_group_and_beat_truncation() {
         visible[1], sessions[0].path,
         "unpinned rows keep recency order after the pin"
     );
+}
+
+#[test]
+fn expanded_group_keeps_all_pins_and_runs_visible_above_the_cap() {
+    let count = SIDEBAR_GROUP_SESSIONS_VISIBLE + 3;
+    let sessions: Vec<SessionInfo> = (0..count)
+        .map(|i| store_session(&format!("a{i}"), "/work/alpha"))
+        .collect();
+    let pinned: HashSet<PathBuf> = sessions
+        .iter()
+        .take(count - 1)
+        .map(|s| s.path.clone())
+        .collect();
+    let running = HashSet::from([sessions[count - 1].path.clone()]);
+    let active = Some(sessions[count - 1].path.clone());
+    let rows = build_sidebar_rows(
+        &sessions,
+        &workspace_paths(&["/work/alpha"]),
+        WorkspaceSort::Manual,
+        &HashMap::new(),
+        "alpha",
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashMap::new(),
+        &pinned,
+        &active,
+        &running,
+        &HashSet::new(),
+    );
+    assert_eq!(
+        session_row_paths(&rows, &sessions),
+        sessions.iter().map(|s| s.path.clone()).collect::<Vec<_>>()
+    );
+    assert!(!rows
+        .iter()
+        .any(|row| matches!(row, SideRow::ShowMore { .. })));
 }
 
 #[test]
@@ -319,6 +363,7 @@ fn pinned_sessions_stay_visible_in_a_collapsed_workspace() {
         &HashMap::new(),
         &pinned,
         &None,
+        &HashSet::new(),
         &HashSet::new(),
     );
     let visible = session_row_paths(&rows, &sessions);
@@ -364,6 +409,7 @@ fn show_more_reveals_one_step_at_a_time() {
         &HashSet::new(),
         &None,
         &HashSet::new(),
+        &HashSet::new(),
     );
     assert_eq!(
         session_row_paths(&rows, &sessions).len(),
@@ -389,6 +435,7 @@ fn show_more_reveals_one_step_at_a_time() {
         &expanded,
         &HashSet::new(),
         &None,
+        &HashSet::new(),
         &HashSet::new(),
     );
     assert_eq!(
@@ -418,6 +465,7 @@ fn show_more_reveals_one_step_at_a_time() {
         &HashSet::new(),
         &None,
         &HashSet::new(),
+        &HashSet::new(),
     );
     assert_eq!(session_row_paths(&rows, &sessions).len(), total);
     assert_eq!(show_more(&rows), None);
@@ -443,6 +491,7 @@ fn show_more_step_never_overshoots_the_tail() {
         &HashMap::new(),
         &HashSet::new(),
         &None,
+        &HashSet::new(),
         &HashSet::new(),
     );
     let step = rows.iter().find_map(|r| match r {
@@ -472,6 +521,7 @@ fn sticky_rows() -> Vec<SideRow> {
         &HashMap::new(),
         &HashSet::new(),
         &None,
+        &HashSet::new(),
         &HashSet::new(),
     )
 }
@@ -528,6 +578,7 @@ fn sticky_header_skips_collapsed_groups() {
         &HashMap::new(),
         &HashSet::new(),
         &None,
+        &HashSet::new(),
         &HashSet::new(),
     );
     assert_eq!(sticky_at(&rows, 0, 10.), None);

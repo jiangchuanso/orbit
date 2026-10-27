@@ -49,6 +49,7 @@ fn rows_for(
         &HashSet::new(),
         &None,
         &HashSet::new(),
+        &HashSet::new(),
     )
 }
 
@@ -117,10 +118,8 @@ fn last_updated_sorts_an_empty_group_last() {
 }
 
 #[test]
-fn last_updated_keeps_the_open_sessions_group_first() {
-    // beta has the newest activity (a background run writing), but alpha
-    // holds the open session. Alpha must still lead, or the workspace the
-    // user is working in slides down on every watcher reload.
+fn last_updated_does_not_override_activity_when_opening_a_session() {
+    // Opening alpha must not override the explicitly selected activity sort.
     let sessions = vec![
         store_session("a1", "/work/alpha", 10),
         store_session("b1", "/work/beta", 30),
@@ -140,8 +139,9 @@ fn last_updated_keeps_the_open_sessions_group_first() {
         &HashSet::new(),
         &active,
         &HashSet::new(),
+        &HashSet::new(),
     );
-    assert_eq!(group_labels(&rows), vec!["alpha", "beta"]);
+    assert_eq!(group_labels(&rows), vec!["beta", "alpha"]);
 }
 
 #[test]
@@ -169,6 +169,7 @@ fn active_session_leads_its_group_over_a_newer_run() {
         &HashSet::new(),
         &active,
         &running,
+        &HashSet::new(),
     );
     let indices: Vec<usize> = rows
         .iter()

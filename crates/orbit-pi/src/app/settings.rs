@@ -5852,6 +5852,9 @@ impl OrbitApp {
     }
 
     pub(super) fn rename_session(&mut self, cx: &mut Context<Self>) {
+        if self.pending_session_rename.is_some() {
+            return;
+        }
         // Enter while an IME candidate window is open confirms the candidate;
         // it must not commit a half-composed name. The click path is covered
         // by the same guard, since the preedit text is not a final answer.
@@ -5983,6 +5986,13 @@ impl OrbitApp {
             None,
             None,
             Some(self.theme_select(theme.mode, theme, this.clone(), cx)),
+        ));
+        theme_rows.push(self.setting_row(
+            theme,
+            &tr!("settings.accent_color"),
+            None,
+            None,
+            Some(self.accent_color_control(theme, this.clone(), cx)),
         ));
         theme_rows.push(self.setting_row(
             theme,
@@ -6249,6 +6259,47 @@ impl OrbitApp {
                     }),
             )
             .into_any_element()
+    }
+
+    fn accent_color_control(
+        &self,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        use theme::AccentColor;
+        let current = theme::appearance_prefs(cx).accent_color;
+        let label = |color: AccentColor| match color {
+            AccentColor::Default => tr!("settings.accent_default").to_string(),
+            AccentColor::Blue => tr!("settings.accent_blue").to_string(),
+            AccentColor::Coral => tr!("settings.accent_coral").to_string(),
+            AccentColor::Orange => tr!("settings.accent_orange").to_string(),
+            AccentColor::Lime => tr!("settings.accent_lime").to_string(),
+            _ => color.label().to_string(),
+        };
+        let selected = AccentColor::ALL
+            .iter()
+            .position(|color| *color == current)
+            .unwrap_or(0);
+        self.select_control(
+            "accent-color-select",
+            SettingsSelect::AccentColor,
+            label(current),
+            AccentColor::ALL.into_iter().map(label).collect(),
+            selected,
+            theme,
+            this,
+            cx,
+        )
+    }
+
+    fn set_accent_color(&mut self, color: theme::AccentColor, cx: &mut Context<Self>) {
+        let mut prefs = theme::appearance_prefs(cx);
+        prefs.accent_color = color;
+        if let Err(error) = theme::set_appearance_prefs(cx, prefs) {
+            self.toast_error(tr!("settings.appearance_save_failed", error = error));
+        }
+        cx.notify();
     }
 
     fn set_design_system(&mut self, design_system: theme::DesignSystem, cx: &mut Context<Self>) {
@@ -6836,6 +6887,7 @@ impl OrbitApp {
                 "%",
             ),
             SettingsSelect::Language
+            | SettingsSelect::AccentColor
             | SettingsSelect::Theme(_)
             | SettingsSelect::UiFontFamily
             | SettingsSelect::CodeFontFamily
@@ -6957,6 +7009,14 @@ impl OrbitApp {
         cx: &Context<Self>,
     ) -> AnyElement {
         let open = self.settings_select == Some(kind);
+        let model_provider = match kind {
+            SettingsSelect::TitleModel if selected == 0 => Some(self.model_provider.as_str()),
+            SettingsSelect::TitleModel | SettingsSelect::DefaultModel if selected > 0 => self
+                .available_models
+                .get(selected - 1)
+                .map(|model| model.provider.as_str()),
+            _ => None,
+        };
         let chip_this = this.clone();
         div()
             .flex()
@@ -6987,7 +7047,7 @@ impl OrbitApp {
                         chip_this.update(cx, |app, cx| {
                             // A dismissal from this same click's mouse-down
                             // must not immediately re-open (see
-                            // `toggle_session_menu`).
+                            // `toggle_workspace_menu`).
                             const GESTURE: Duration = Duration::from_millis(200);
                             if let Some(dismissed) = app.menu_dismissed_at.take() {
                                 if dismissed.elapsed() < GESTURE {
@@ -7010,6 +7070,13 @@ impl OrbitApp {
                             }
                             cx.notify();
                         });
+                    })
+                    .when_some(model_provider, |chip, provider| {
+                        chip.child(icon_dyn(
+                            provider_icon(provider),
+                            context_menu::ICON.px(&theme),
+                            provider_mark_color(provider, &theme, theme.text_muted),
+                        ))
                     })
                     .child(label)
                     .child(icon(
@@ -7045,6 +7112,18 @@ impl OrbitApp {
             .map(|ix| (ix, options[ix].clone()))
             .collect();
         let empty = rows.is_empty();
+        let model_rows = matches!(
+            kind,
+            SettingsSelect::TitleModel | SettingsSelect::DefaultModel
+        )
+        .then(|| {
+            self.available_models
+                .iter()
+                .map(|model| (model.provider.clone(), model.name.clone()))
+                .collect::<Vec<_>>()
+        });
+        let active_provider = self.model_provider.clone();
+        let active_model = self.model_label.clone();
         let highlight = self.settings_select_highlight;
         // Virtualized list — only the visible rows are laid out and painted.
         // The font-family dropdowns can have a thousand+ entries, and the
@@ -7083,6 +7162,25 @@ impl OrbitApp {
                         let selected_row = orig_ix == selected;
                         let highlighted_row = highlight == Some(orig_ix);
                         let this = this.clone();
+                        let model = model_rows.as_ref().and_then(|models| {
+                            orig_ix.checked_sub(1).and_then(|ix| models.get(ix))
+                        });
+                        let provider = model.map(|(provider, _)| provider.as_str()).or_else(|| {
+                            (model_rows.is_some()
+                                && kind == SettingsSelect::TitleModel
+                                && orig_ix == 0)
+                                .then_some(active_provider.as_str())
+                        });
+                        let primary = model.map_or(option.as_str(), |(_, name)| name.as_str());
+                        let secondary = model
+                            .map(|(provider, _)| crate::providers::provider_display_name(provider))
+                            .or_else(|| {
+                                (model_rows.is_some()
+                                    && kind == SettingsSelect::TitleModel
+                                    && orig_ix == 0
+                                    && !active_model.is_empty())
+                                .then(|| active_model.clone())
+                            });
                         // Every row is exactly one picker entry tall
                         // (`uniform_list` strides by the first row, and
                         // `list_h` uses the same `row_h`). The block shell
@@ -7108,7 +7206,37 @@ impl OrbitApp {
                                     } else {
                                         theme.text_secondary
                                     })
-                                    .child(option.clone())
+                                    .when(kind == SettingsSelect::AccentColor, |row| {
+                                        let base = Theme::for_id(theme.theme_id);
+                                        let color =
+                                            theme::AccentColor::ALL[orig_ix].apply(base).accent;
+                                        row.child(div().size(px(14.)).rounded_full().bg(color))
+                                    })
+                                    .when_some(provider, |row, provider| {
+                                        row.child(icon_dyn(
+                                            provider_icon(provider),
+                                            context_menu::ICON.px(&theme),
+                                            provider_mark_color(provider, &theme, theme.text_muted),
+                                        ))
+                                    })
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .child(primary.to_owned()),
+                                    )
+                                    .when_some(secondary, |row, provider| {
+                                        row.child(
+                                            div()
+                                                .flex_none()
+                                                .max_w(px(120.))
+                                                .truncate()
+                                                .text_size(TextSize::Small.px(&theme))
+                                                .text_color(theme.text_muted)
+                                                .child(provider),
+                                        )
+                                    })
                                     .when(selected_row, |row| {
                                         row.child(icon(
                                             "icons/check.svg",
@@ -7280,6 +7408,12 @@ impl OrbitApp {
         cx: &mut Context<Self>,
     ) -> bool {
         match kind {
+            SettingsSelect::AccentColor => {
+                if let Some(color) = theme::AccentColor::ALL.get(ix).copied() {
+                    self.set_accent_color(color, cx);
+                }
+                return true;
+            }
             SettingsSelect::Theme(mode) => {
                 let catalog = self.theme_catalog(mode, cx);
                 let Some(id) = catalog.get(ix).copied() else {
@@ -7452,6 +7586,7 @@ impl OrbitApp {
                 ui.spacing_density = SPACING_DENSITIES.get(ix).copied().unwrap_or(100);
             }
             SettingsSelect::Theme(_)
+            | SettingsSelect::AccentColor
             | SettingsSelect::UiFontFamily
             | SettingsSelect::CodeFontFamily
             | SettingsSelect::BackdropCell
