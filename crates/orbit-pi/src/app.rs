@@ -479,6 +479,8 @@ pub struct OrbitApp {
     queue_edit: Option<QueueEdit>,
     /// Settings → Agent: `set_follow_up_mode` value.
     follow_up_mode: String,
+    /// Settings → Agent: `set_steering_mode` value.
+    steering_mode: String,
     /// Settings → Agent: `set_auto_compaction` value (read back from state).
     auto_compaction: bool,
     /// Settings → Agent: `set_auto_retry` value. pi's `get_state` does not
@@ -729,6 +731,14 @@ pub struct OrbitApp {
     /// opens): the activation observer that gates notifications, and the
     /// window-closed observer that clears that gate.
     _window_watchers: Vec<Subscription>,
+    /// The main window's last frame (#131), written to `window.json` on a
+    /// debounce, on close and on quit. `None` until a window registers.
+    window_state: Option<crate::window_state::Saved>,
+    /// The pending debounced write of `window_state`; replacing it cancels
+    /// the previous one.
+    window_state_save: Option<gpui::Task<()>>,
+    /// Keeps the bounds, close and quit observers behind `window_state`.
+    _window_state_watchers: Vec<Subscription>,
     /// Visited sessions, oldest first — drives the top-bar back/forward
     /// navigation. `history_index` points at the active entry.
     session_history: Vec<SessionInfo>,
@@ -1232,18 +1242,10 @@ pub struct OrbitApp {
     provider_filter: Entity<ComposerInput>,
     /// Re-render the grid as the filter is typed.
     _provider_filter_sub: Subscription,
-    /// Search filter for the Models page.
-    models_filter: Entity<ComposerInput>,
-    /// Re-render the model list as the filter is typed.
-    _models_filter_sub: Subscription,
-    /// Models page: show favorited models only (the second filter next to
-    /// the search field).
+    /// Providers & models page: show favorited models only (the second
+    /// filter next to the search field).
     models_favorites_only: bool,
-    /// Models page: provider scope. `None` shows every provider; `Some(id)`
-    /// narrows the grid to one, mirroring the composer picker's provider
-    /// chips.
-    models_provider_filter: Option<String>,
-    /// True while the Models page's "Update model list" action runs pi's
+    /// True while the Providers & models page's "Update model list" runs pi's
     /// catalog refresh and reloads the agent.
     models_refreshing: bool,
     /// Skills discovered for the current workspace (project + user scope).
@@ -1299,10 +1301,18 @@ pub struct OrbitApp {
     subagent_editor: Option<subagents_ui::SubagentEditor>,
     /// Orbit-only agent settings (`~/.orbit-pi/subagents.json`).
     subagent_config: crate::subagents::Config,
+    /// What the current live session last reported about the `subagent` name;
+    /// `None` until that session reports.
+    subagent_status: Option<crate::subagents::Status>,
+    /// Polls status while the Subagents page is open; cancelled with the app.
+    subagent_status_task: Option<gpui::Task<()>>,
     /// A user agent deleted this session; Undo restores its exact bytes.
     subagent_undo: Option<subagents_ui::SubagentUndo>,
     /// The Delete button has been pressed once.
     subagent_delete_confirm: bool,
+    /// A Select / New / Duplicate held back because it would throw away
+    /// unsaved edits; the header asks before running it.
+    subagent_discard_pending: Option<subagents_ui::SubagentAction>,
     /// Why the last save/delete failed, shown under the form.
     subagent_error: Option<String>,
     /// Re-render the agent list as the filter is typed.
@@ -1818,21 +1828,12 @@ impl OrbitApp {
         let provider_filter = cx.new(|cx| {
             ComposerInput::new(cx)
                 .with_element_id("provider-filter")
-                .with_placeholder_key("app.search_providers")
+                .with_placeholder_key("app.search_providers_and_models")
                 .with_key_context("Composer Picker")
                 .with_max_lines(1)
                 .with_wrap(false)
         });
         let provider_filter_sub = cx.observe(&provider_filter, |_, _, cx| cx.notify());
-        let models_filter = cx.new(|cx| {
-            ComposerInput::new(cx)
-                .with_element_id("models-filter")
-                .with_placeholder_key("app.search_models")
-                .with_key_context("Composer Picker")
-                .with_max_lines(1)
-                .with_wrap(false)
-        });
-        let models_filter_sub = cx.observe(&models_filter, |_, _, cx| cx.notify());
 
         // Settings → Plugins: the install-source field. `Composer Picker`
         // keeps editing keys live; Enter is unhandled, so the Install button
@@ -1969,11 +1970,15 @@ impl OrbitApp {
         });
 
         // Composer edits notify only the input entity. Re-rank the
-        // slash/mention menu here, then repaint the app only when the chrome
-        // that reads the draft actually changed: notifying on every keystroke
-        // rebuilt the whole window — sidebar, header, git panel, every visible
-        // transcript row — to move one button between two states, which is what
-        // typing mid-message felt like.
+        // slash/mention menu here, and notify the app only when the chrome that
+        // reads the draft actually changed.
+        //
+        // This does not keep a keystroke from rebuilding the window. GPUI marks
+        // a notified view's ancestors dirty too, and the composer is drawn
+        // inside this view, which is the window's root: every edit re-runs
+        // `OrbitApp::render` and lays out the whole tree regardless. What makes
+        // a keystroke cheaper is a sibling that is a `.cached()` view (reused
+        // while clean) or a cheaper app render — not this check.
         //
         // The key is advisory in one direction: a path that repaints the app for
         // its own reason (a paste, a queue change) leaves it stale, which costs
@@ -2273,6 +2278,7 @@ impl OrbitApp {
             queue_replaced: false,
             queue_edit: None,
             follow_up_mode: "one-at-a-time".into(),
+            steering_mode: "one-at-a-time".into(),
             auto_compaction: true,
             auto_retry: true,
             auto_title: crate::auto_title::AutoTitleConfig::load(),
@@ -2379,6 +2385,9 @@ impl OrbitApp {
             awaiting_review: HashMap::new(),
             activate_window_pending: false,
             _window_watchers: Vec::new(),
+            window_state: None,
+            window_state_save: None,
+            _window_state_watchers: Vec::new(),
             session_history: Vec::new(),
             history_index: 0,
             collapsed_workspaces: HashSet::new(),
@@ -2581,10 +2590,7 @@ impl OrbitApp {
             providers_refreshing: false,
             provider_filter: provider_filter.clone(),
             _provider_filter_sub: provider_filter_sub,
-            models_filter: models_filter.clone(),
-            _models_filter_sub: models_filter_sub,
             models_favorites_only: false,
-            models_provider_filter: None,
             models_refreshing: false,
             skills: Vec::new(),
             subagents: Vec::new(),
@@ -2592,8 +2598,11 @@ impl OrbitApp {
             selected_subagent: None,
             subagent_editor: None,
             subagent_config: crate::subagents::Config::default(),
+            subagent_status: None,
+            subagent_status_task: None,
             subagent_undo: None,
             subagent_delete_confirm: false,
+            subagent_discard_pending: None,
             subagent_error: None,
             plugins: Vec::new(),
             plugins_error: None,
@@ -2819,6 +2828,61 @@ impl OrbitApp {
             app.input.read(cx).focus(window);
         });
         self._window_watchers = vec![activation, closed, focus_lost];
+    }
+
+    /// Remember where the main window is, so the next launch reopens it
+    /// there (#131). `opened_as` is the frame the window was asked to open
+    /// with: macOS reports a zoomed window's zoomed frame, so the restore
+    /// frame has to be carried from before the zoom.
+    ///
+    /// A resize or move updates the in-memory state at once and writes
+    /// `window.json` after the frame has been still for half a second;
+    /// closing the window or quitting writes it immediately.
+    pub(crate) fn watch_window_bounds(
+        &mut self,
+        opened_as: crate::window_state::Saved,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.window_state = Some(opened_as);
+        let bounds = cx.observe_window_bounds(window, |app, window, cx| {
+            let display = window
+                .display(cx)
+                .and_then(|d| d.uuid().ok())
+                .map(|uuid| uuid.to_string());
+            let state = crate::window_state::Saved::observe(
+                app.window_state.as_ref(),
+                window.window_bounds(),
+                window.is_maximized(),
+                display,
+            );
+            if app.window_state.as_ref() == Some(&state) {
+                return;
+            }
+            app.window_state = Some(state.clone());
+            app.window_state_save = Some(cx.background_spawn(async move {
+                gpui::Timer::after(std::time::Duration::from_millis(500)).await;
+                state.persist();
+            }));
+        });
+        let this = cx.weak_entity();
+        let closed = cx.on_window_closed(move |cx| {
+            this.update(cx, |app, _| app.flush_window_state()).ok();
+        });
+        let quit = cx.on_app_quit(|app, _| {
+            app.flush_window_state();
+            async {}
+        });
+        self._window_state_watchers = vec![bounds, closed, quit];
+    }
+
+    /// Write the pending window frame now instead of after the debounce.
+    fn flush_window_state(&mut self) {
+        if self.window_state_save.take().is_some() {
+            if let Some(state) = &self.window_state {
+                state.persist();
+            }
+        }
     }
 
     /// Sidebar view of the session store: the sessions on disk plus a
@@ -3707,7 +3771,6 @@ pub(crate) enum SettingsSection {
     Worktrees,
     GitAccounts,
     Providers,
-    Models,
     Skills,
     Subagents,
     Permissions,
@@ -3850,6 +3913,10 @@ struct ProviderEditor {
     /// A key is already stored in models.json (placeholder + hint).
     had_api_key: bool,
     error: Option<String>,
+    /// A **Fetch models** request is in flight (#131).
+    fetching: bool,
+    /// The in-flight fetch; dropping the editor cancels its result.
+    _fetch: Option<gpui::Task<()>>,
 }
 
 /// The API-key editor's open state (one field, provider-scoped).
@@ -4090,10 +4157,9 @@ enum SettingsSelect {
     /// The model an agent is pinned to (Settings → Subagents). The options are
     /// this machine's models; the leading row inherits the session's.
     SubagentModel,
-    /// The session's active model (Settings → Models).
+    /// The session's active model (Settings → Providers & models).
     ActiveModel,
     /// The Models page's provider scope filter.
-    ModelProvider,
     /// The session-retention action and threshold (Settings → Privacy).
     RetentionMode,
     RetentionDays,
@@ -4160,6 +4226,8 @@ mod focus_return_tests;
 #[cfg(test)]
 mod git_chip_tests;
 #[cfg(test)]
+mod manage_models_tests;
+#[cfg(test)]
 mod mention_index_tests;
 #[cfg(test)]
 mod new_task_layout_tests;
@@ -4213,6 +4281,8 @@ mod sidebar_sort_tests;
 mod sidepane_full_width_tests;
 #[cfg(test)]
 mod stale_error_tests;
+#[cfg(test)]
+mod steering_mode_tests;
 #[cfg(test)]
 mod stop_escalation_tests;
 #[cfg(test)]

@@ -29,10 +29,10 @@ order; each phase is releasable on its own, and stopping after any gate leaves t
 | Phase | Implementation | Automated tests | Manual gate |
 |---|---|---|---|
 | 0 — spike | Done (the seam was proven with a real `pi` rather than committed fixtures) | — | One real child run captured and inspected |
-| 1 — one child | Done, plus chain/parallel from Phase 3 | `node --test contrib/orbit-subagents-extension/*.test.mjs` (70), guard (31), `bundled_extensions` (6) | One real delegation returned its report and cost; abort and refusal paths covered by tests |
-| 2 — the card | Done: `ToolCall.details`, `subagent.rs`, the three zoom levels | `subagent::` (13), transcript details (3), card render | Not inspected in the running app |
+| 1 — one child | Done, plus chain/parallel from Phase 3 | `node --test contrib/orbit-subagents-extension/*.test.mjs` (91, including the real-`pi` seam), guard (31), `bundled_extensions` (6) | One real delegation returned its report and cost; abort and refusal paths covered by tests |
+| 2 — the card | Done: `ToolCall.details`, `subagent.rs`, the three zoom levels | `subagent::` (11), transcript details (3), card render | Not inspected in the running app |
 | 3 — fan-out | Done (folded into Phase 1) | Chain `{previous}`, 5-task pool ≤ 4 concurrent, depth/cap refusals | Real 5-child pool not exercised |
-| 4 — the page | Done: `subagent_file.rs`, `subagents.rs`, Settings → Subagents | `subagent_file` (14), `subagents` (6), page render (2) | Not inspected in the running app |
+| 4 — the page | Done: `subagent_file.rs`, `subagents.rs`, Settings → Subagents | `subagent_file` (14), `subagents` (9), page render (4) | Not inspected in the running app |
 | 5 — safety pass | **Not started** | Mode matrix unit-tested in `mode.test.mjs` | Full Access × Plan × tier matrix not exercised in the GUI |
 | 6 — inspectable runs | **Not started** | — | — |
 
@@ -138,7 +138,7 @@ entire integration surface, and it is documented, not internal.
 
 ### D-A — The feature is an extension plus a card; the RPC wire does not change
 
-`crates/orbit-rpc` stays a transport (`AGENT.md`: "transport, not a place for UI, HTTP, or runtime
+`crates/orbit-rpc` stays a transport (`AGENTS.md`: "transport, not a place for UI, HTTP, or runtime
 helpers"). The tool call arrives as an ordinary `tool_execution_*` event, its `details` carry the
 run state, and Orbit renders it. Nothing in the protocol has to learn what a subagent is.
 
@@ -157,10 +157,36 @@ warm pool in `sessions` exists for user-visible sessions, not for delegated work
 
 ### D-C — The tool is named `subagent`, and Orbit stands down if something else provides it
 
-The name is what prompts and muscle memory already use. At activation the extension asks
-`pi.getAllTools()`; if a tool named `subagent` is already registered (for example `pi-subagents` is
-installed), Orbit's extension **does not register** and Settings → Subagents says so in plain
-words. Two implementations racing for one name is worse than one honest message.
+The name is what prompts and muscle memory already use. The extension asks `pi.getAllTools()` at
+`session_start` — **not** while it loads — and if a tool named `subagent` is already registered by
+some other file (for example `pi-subagents` is installed), Orbit's extension **does not register**
+and says so, naming the owner. Two implementations racing for one name is worse than one honest
+message.
+
+**Why `session_start`, in one paragraph (issue #122).** pi 1.5 treats two extensions registering one
+tool name as a fatal load error: it records `Tool "subagent" conflicts with …`, then exits before
+serving the session — so every Orbit session died, not just the tool. Orbit loads its extensions with
+`--extension`, which pi appends *after* discovered extensions and packages, so Orbit was always the
+second registration. The check that should have prevented that ran at load, where `getAllTools()` is
+an unbound stub that throws; the guard swallowed the throw, read it as an empty list, and registered
+anyway. At `session_start` the list is bound and every entry carries `sourceInfo.path`, so a foreign
+owner is distinguishable from our own earlier registration in the same process. The rule that came
+out of this: **an unreadable tool list is not an empty one, and nothing registers on a guess.**
+
+**The scan no longer protects us.** Once nobody registers at load, pi's conflict check has nothing to
+compare, so a missed ownership check cannot crash the app — it does something quieter. pi keeps the
+*first* registration for a name, and discovered extensions sort before `--extension` ones, so a
+shadowed Orbit registration is inert while the app believes the feature is on. That is why the check
+is repeated at every `session_start` and followed by a read-back: if `subagent` in the registry is
+not ours, Orbit records that it stood down instead of reporting a catalog with no effect.
+
+**Where the page learns it.** The extension writes `~/.orbit-pi/subagents-status.json` at every
+`session_start` (`{ active, tool, reason, owner, updatedAt }`), and Settings → Subagents reads it
+when the section opens. `subagents::load_status` returns `None` for a missing or unparsable file —
+absence is not a verdict, so the page claims nothing until a session has actually decided. A banner
+above the list names the owner and links to Settings → Plugins; the agent list stays editable,
+because those files are what the owning extension reads too. The extension also raises a toast with
+the same sentence, for the user who is not in Settings when it happens.
 
 **Decided here rather than left open:** standing down, not namespacing. A `orbit_subagent` name
 would be predictable for us and unknown to every prompt the user already has. The cost of standing
@@ -180,7 +206,7 @@ can instruct a model to run anything. pi's own example defaults to user scope fo
 Phase 5 may add project scope behind Orbit's project trust, off by default.
 
 Frontmatter is read by a ~20-line reader for exactly these five keys, not by a YAML parser
-(`AGENT.md`: `contrib/` is zero-dependency). A malformed file is skipped with a diagnostic; it
+(`AGENTS.md`: `contrib/` is zero-dependency). A malformed file is skipped with a diagnostic; it
 never takes down discovery of the others.
 
 ### D-E — Children inherit the parent's guardrails; they never prompt
@@ -893,6 +919,20 @@ Per child: status glyph · agent · capability chip · **current activity** · t
 per-tool tally on hover: `read ×4 · grep ×7 · bash ×1`) · elapsed · mode chip when not inherited ·
 model · usage. The running child's glyph pulses with the composer's existing wave.
 
+**Shipped:** the row is status glyph · agent · current activity · tool count · elapsed (tabular
+figures). The capability, model, thinking level and per-tool tally live at the top of the child's
+log rather than in the row, because a parallel run reads best as a column of activities. The
+tool count and elapsed are fixed-minimum, right-aligned cells that are always drawn, so a parallel
+run's rows line up as columns. The leading mark speaks the parent's activity language: a working
+child turns the shared spinner (static under Reduce Motion), a queued child shows a muted task
+glyph, and a settled child shows check / stop / ✕. Each row ends in the same disclosure chevron as
+every other expandable activity row. A single-child footer leaves out the count, tools and clock
+the row already shows; with no usage to report it is not drawn at all, and whatever ends the card
+carries the rounded bottom. The card frame keeps the quiet hairline on failure, like every
+activity card; the child's glyph and the error line say it failed. In chain mode each row carries its step number in muted tabular figures, so the footer's
+`step 2 of 3` points at a row; a parallel run has no order and is not numbered. A child that has
+sent no event for 15 s while starting or thinking reads `no activity for 21s`.
+
 Under the rows:
 
 - **Run footer** — `3 agents · 44 tools · 1:52 · ↑12.1k ↓2.6k <$0.05`; in chain mode also `step 2 of 3`.
@@ -922,6 +962,15 @@ open at a time (predictable row heights).
 
 The final **report** renders below the log as Markdown, display-capped with the existing
 `DETAIL_TEXT_CAP`, a copy action, and a `truncated N KiB` strip when the parent received a capped copy.
+
+**Shipped:** the log opens with the task (≤280 chars), then capability · model · thinking, then the
+tool tally. Steps use the parent's activity glyph and verb, with the `+N earlier steps` line *above*
+them, since the earlier steps came first. The verb column is 68px, and widens to 112px for the whole log when any verb is
+longer than eight characters (`List resources`), so no verb is cut and the arguments still align. A step that a guard refused gets a `warning` alert mark,
+and a failed step gets an `error` ✕; a successful step gets no mark. The report has a copy button
+that copies the whole report, and a note when the parent received only the first 4 KiB
+(`BOUNDS.contentReport`). Only a guard's own refusal sentence makes a call *blocked*; a tool that ran
+and failed is a failed step (`isDenial` in `run.js`).
 
 ### 9.4 States, and what each one says
 
@@ -983,6 +1032,12 @@ total: they are not the parent's work, and counting them would inflate the turn.
 (the existing tool-detail binding), and a `jump to the running delegation` palette action scrolls to
 the card and focuses it. Focus never moves on its own when a child updates — a streaming card that
 steals focus mid-typing is worse than no card.
+
+**Shipped:** each child row is a tab stop (`SubagentRow` key context). `⏎` or `Space` toggles that
+child's log; `Esc` closes it when it is the open one and otherwise falls through to the global abort.
+A focused row paints the 1px `focus_ring` as an overlay, so focus costs no layout. A pointer click
+opens the log without taking focus, so the composer keeps the caret. `⌘O` and the palette action
+are not built: the transcript has no tool-detail binding yet for them to reuse.
 
 ### 9.9 When the user is not looking
 
@@ -1136,7 +1191,7 @@ children per parent session, timeout, project-agents toggle (phase 5, off), and 
 | `crates/orbit-pi/src/lib.rs` | module declarations, re-exports |
 | `crates/orbit-pi/locales/en.yml` | `subagent.*`, `settings.subagents.*` keys (D9: only `en.yml` is hand-edited) |
 | `crates/orbit-pi/docs/subagents.md` | **new** — user one-pager: agents, modes, what children may do |
-| `AGENT.md` | file map rows for the new modules + `contrib/` dir |
+| `AGENTS.md` | file map rows for the new modules + `contrib/` dir |
 | `INTENT.md` | new **D18**, *Implementation status* |
 | `README.md`, `CHANGELOG.md`, `PRODUCT.md` | feature bullet, `[Unreleased]` entry, capability list |
 
@@ -1156,7 +1211,7 @@ previous gate passes; do not carry a phase's UI work into another phase's tests.
 - **Zero-dependency `contrib/`.** No npm install, no bundler; `node --test` only.
 - **i18n is part of the change**, not a follow-up: `en.yml`, the glossary, `gen_locales.py`,
   `check_i18n.py`, and the `i18n` test run once at the end of the phase that adds strings.
-- **Keep the feedback loop short** (`AGENT.md`): `node --test` for the extension, `cargo check -p
+- **Keep the feedback loop short** (`AGENTS.md`): `node --test` for the extension, `cargo check -p
   orbit-pi` plus the named filter for Rust, `bacon run` only when the behavior is visual.
 
 ### 12.1 Phase 0 — spike: prove the seam (½ day)
@@ -1371,7 +1426,7 @@ card is what makes the feature trustworthy.
 
 ## 14. Verification
 
-### 14.1 Commands per change (from `AGENT.md` §Verification)
+### 14.1 Commands per change (from `AGENTS.md` §Verification)
 
 | Change | Command |
 |---|---|
@@ -1480,7 +1535,7 @@ locally only).
 
 ## 16. Docs to update when this ships
 
-Per `AGENT.md` §7, a feature is not done until the docs describe it.
+Per `AGENTS.md` §7, a feature is not done until the docs describe it.
 
 - `INTENT.md` — new **D18 — Subagents: a bundled delegation tool over child `pi` processes**, plus
   *Implementation status*.
@@ -1491,7 +1546,7 @@ Per `AGENT.md` §7, a feature is not done until the docs describe it.
   delete/reset an agent in Settings, that writing a builtin override also overrides `pi-subagents`'
   same-named builtin, that an impossible run is refused before it spends, and how to read the
   delegation card (phases, blocked banner, refusal line, where a child's real steps live).
-- `AGENT.md` — file map rows (`subagent.rs`, `subagent_file.rs`, `subagents.rs`,
+- `AGENTS.md` — file map rows (`subagent.rs`, `subagent_file.rs`, `subagents.rs`,
   `app/subagents_ui.rs`, `contrib/orbit-subagents-extension/`).
 - `README.md` — a Features bullet: delegate to a child agent, and manage agents (capabilities, mode,
   model, prompt) from Settings.
@@ -1513,5 +1568,5 @@ Per `AGENT.md` §7, a feature is not done until the docs describe it.
 - An agent can be authored, edited, renamed, disabled, deleted and reset inside Settings, and the
   next delegation uses it with no restart and no second source of truth.
 - `en.yml` is the only hand-edited locale and `check_i18n.py` is green.
-- INTENT D18, `AGENT.md`'s file map, `README`, `CHANGELOG`, `PRODUCT.md` and the user-facing
+- INTENT D18, `AGENTS.md`'s file map, `README`, `CHANGELOG`, `PRODUCT.md` and the user-facing
   `docs/subagents.md` describe the shipped behavior.

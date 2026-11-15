@@ -370,11 +370,24 @@ impl OrbitApp {
             })
             .ok();
         }) as Box<dyn Fn(bool, &mut Window, &mut App)>;
+        let this = cx.weak_entity();
+        let on_manage_models = Box::new(
+            move |provider: Option<&str>, window: &mut Window, cx: &mut App| {
+                let provider = provider.map(str::to_owned);
+                this.update(cx, |app, cx| {
+                    // Close first, so the picker's focus is handed back
+                    // before Settings takes over the main pane.
+                    app.close_model_selector(window, cx);
+                    app.open_models_settings(provider, cx);
+                })
+                .ok();
+            },
+        ) as Box<dyn Fn(Option<&str>, &mut Window, &mut App)>;
 
         let selector = cx.new(|cx| {
             ModelSelector::new(
                 kind,
-                self.available_models.clone(),
+                self.picker_models(),
                 self.available_thinking_levels.clone(),
                 self.model_label.clone(),
                 self.model_id.clone(),
@@ -383,6 +396,7 @@ impl OrbitApp {
                 on_select_model,
                 on_select_level,
                 on_dismiss,
+                on_manage_models,
                 cx,
             )
         });
@@ -575,8 +589,9 @@ impl OrbitApp {
                 self.run_command(id, window, cx)
             }
             PaletteCommand::OpenSettings(section) => {
-                self.settings_open = true;
+                // Switch before opening so a retained section is refreshed on re-entry.
                 self.set_settings_section(section, cx);
+                self.settings_open = true;
                 self.sync_terminal_active(cx);
             }
             PaletteCommand::Mcp { name, action } => match action {
@@ -717,8 +732,9 @@ impl OrbitApp {
             }
             CommandId::ManageSubagents => {
                 self.command_palette = None;
-                self.settings_open = true;
+                // Preserve an open draft, but refresh when reopening the page.
                 self.set_settings_section(SettingsSection::Subagents, cx);
+                self.settings_open = true;
                 self.sync_terminal_active(cx);
             }
             CommandId::OpenMcpSettings => {
@@ -991,11 +1007,21 @@ impl OrbitApp {
         })
     }
 
+    /// The model picker's catalog: everything pi offers minus the models
+    /// turned off in Settings → Providers & models (#131), keeping the active one.
+    pub(super) fn picker_models(&self) -> Vec<ModelEntry> {
+        crate::hidden_models::all().picker_models(
+            &self.available_models,
+            &self.model_provider,
+            &self.model_id,
+        )
+    }
+
     /// Push the latest catalog/current-selection snapshot into the open
     /// popup (no-op while it is closed).
     pub(super) fn sync_model_selector(&mut self, cx: &mut Context<Self>) {
         if let Some((_, selector)) = &self.model_selector {
-            let models = self.available_models.clone();
+            let models = self.picker_models();
             let levels = self.available_thinking_levels.clone();
             let model = self.model_label.clone();
             let model_id = self.model_id.clone();

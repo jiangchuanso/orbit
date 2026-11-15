@@ -7,6 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.19] - 2026-11-15
+
+### Added
+
+- **Orbit reopens the window where you left it.** The main window's frame, whether it
+  was maximized, and the display it was on are saved to `~/.orbit-pi/window.json` (half a
+  second after a move or resize stops, and on close and quit) and restored on the next
+  launch. A frame that no longer fits is shrunk and moved onto its display, and a display
+  that is no longer attached falls back to the first-launch layout, so a window can never
+  open off-screen (#131).
+- **Manage models… from the model picker.** The picker's footer links to Settings →
+  Providers & models, searched to the provider in view (the scoped provider, or the active
+  model's).
+  ⌘, (Ctrl+, on Windows and Linux) does the same while the picker has focus. The model
+  picker's footer drops its arrow and Enter hints to make room; the thinking picker keeps
+  them (#131).
+- **Steering delivery mode in Settings → Agent.** Steering messages get the same
+  `One at a time` / `All` choice that follow-ups already had, read back from pi's session
+  state (#131).
+- **Both send lanes in the composer.** While a run is in flight and something is typed, a
+  quiet second button beside Send delivers it in the other lane — steer when Enter queues,
+  queue when Enter steers — so a one-off choice no longer means flipping the preference
+  (#131).
+- **Tray and menu-bar icon, and a choice for the close button.** Settings → General →
+  Closing the window: *Hide to tray* (Windows) or *Keep running* (macOS) keeps Orbit and
+  any running task alive behind a notification-area / menu-bar icon with Show Orbit, New
+  task and Quit; *Quit* quits through the same path as ⌘Q / Ctrl+Q, so it still waits for
+  a fork in flight. macOS keeps running by default, as it always has; Windows and Linux
+  keep quitting by default until you opt in. On Linux the icon is a StatusNotifierItem
+  (KDE, Xfce, most panels, GNOME with the AppIndicator extension); where no host is
+  running, closing the window still quits, so it can never vanish with no way back (#131).
+- **Providers and models on one page.** Settings → Providers & models replaces the
+  separate Models page: the active model leads, connected providers list their models
+  directly under their cards, and providers that are not set up yet follow in their own
+  section. One search narrows both, and the favorites filter and *Update model list* moved
+  onto its toolbar (#131).
+- **Choose which models the picker shows.** Each model card in Settings → Providers & models has an eye to
+  hide or show it in the composer's model picker, and each provider has Hide all / Show
+  all. Hiding never deletes: the provider's catalog is untouched, models it adds later
+  still appear, and the session's own model stays pickable (#131).
+- **Fetch models for a custom provider.** The provider editor's **Fetch models** asks the
+  base URL's `/models` endpoint (OpenAI-compatible servers such as OpenRouter, Ollama, LM
+  Studio and vLLM, plus Mistral and Anthropic) and adds every id not listed yet (#131).
+- **Archive a whole workspace.** The workspace header menu gains *Archive all sessions*;
+  archived sessions stay on disk and come back from the sidebar's archived view (#131).
+- **Every language covers the whole app.** About 930 strings per locale still fell back
+  to English — Git panel, MCP, subagents, settings, Explorer, wallpaper, updates,
+  exports — in Simplified Chinese, Japanese, Korean, Spanish, French, German, Brazilian
+  Portuguese, Russian and Italian. They are translated now; what remains English is
+  deliberate (product names, Git terms some languages keep, example ids, and text the
+  model itself reads). CI now fails when a locale gains an untranslated string outside
+  `scripts/i18n_untranslated_baseline.json` (#131).
+
+### Fixed
+
+- **Line breaks in translated worktree messages.** `gen_locales.py` doubled the backslash
+  in `\n`, so eight worktree errors showed a literal `\n\n` in every non-English locale.
+  Regenerating the locales also no longer reverts translations that were edited straight
+  into a locale file; those now live in `scripts/i18n_glossary_preserved.py`.
+- **Orbit no longer fails to start when `pi-subagents` is installed.** pi 1.5 treats two
+  extensions registering one tool name as a fatal load error, so the bundled `subagent`
+  extension collided with `pi-subagents` and every session exited before it began. The
+  tool is now registered when the session starts rather than while the extension loads,
+  which is also the first moment `getAllTools()` can answer: the ownership check that was
+  meant to stand down had been reading a throwing stub as "no tools yet". Orbit now stands
+  down when another extension owns the name, and Settings → Subagents shows a banner naming the
+  owner instead of a catalog that has no effect on the session (#122).
+
 ### Changed
 
 - **Composer "+" menu picks several images or files at once.** "Attach images…"
@@ -1863,7 +1931,7 @@ not asked on every turn.
 - In-transcript find (⌘F) and a full-window image lightbox.
 - Native macOS app bundle, Developer-ID signed and notarizable.
 
-[Unreleased]: https://github.com/imrj05/orbit/compare/v0.2.18...HEAD
+[Unreleased]: https://github.com/imrj05/orbit/compare/v0.2.19...HEAD
 [0.0.1]: https://github.com/imrj05/orbit/releases/tag/v0.0.1
 [0.0.2]: https://github.com/imrj05/orbit/releases/tag/v0.0.2
 [0.0.3]: https://github.com/imrj05/orbit/releases/tag/v0.0.3
@@ -1902,3 +1970,4 @@ not asked on every turn.
 [0.2.16]: https://github.com/imrj05/orbit/releases/tag/v0.2.16
 [0.2.17]: https://github.com/imrj05/orbit/releases/tag/v0.2.17
 [0.2.18]: https://github.com/imrj05/orbit/releases/tag/v0.2.18
+[0.2.19]: https://github.com/imrj05/orbit/releases/tag/v0.2.19

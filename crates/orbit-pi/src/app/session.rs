@@ -876,6 +876,31 @@ impl OrbitApp {
         }
     }
 
+    /// The composer's alternate-lane button: the same send as
+    /// [`Self::on_send_click`], in the lane the Enter preference does not pick.
+    pub(super) fn on_send_alternate_click(
+        &mut self,
+        _: &MouseUpEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.send_composer_alternate(cx);
+    }
+
+    /// Send the composer's text in the lane the Enter preference does not
+    /// pick (#131).
+    pub(super) fn send_composer_alternate(&mut self, cx: &mut Context<Self>) {
+        if self.input.read(cx).is_composing() {
+            return;
+        }
+        if self.commit_autocomplete_if_open(CompletionIntent::Send, cx) {
+            return;
+        }
+        let text = self.input.read(cx).text();
+        let mode = theme::get(cx).ui.composer_send_mode.opposite();
+        self.submit_as(text, mode, cx);
+    }
+
     pub(super) fn on_send_click(
         &mut self,
         _: &MouseUpEvent,
@@ -984,8 +1009,7 @@ impl OrbitApp {
                 cx.notify();
                 return;
             }
-            self.settings_open = false;
-            cx.notify();
+            self.close_settings(cx);
             return;
         }
         if self.model_selector.is_some() {
@@ -1193,6 +1217,9 @@ impl OrbitApp {
         if self.rewind_transition_pending(cx) {
             return;
         }
+        if self.guard_subagent_navigation(subagents_ui::SubagentAction::NewSession, cx) {
+            return;
+        }
         // A run in flight must not be sacrificed to start a new task. pi's
         // `new_session` replaces the session and calls `abort()` on the live
         // turn (`agent-session-runtime.teardownCurrent`), which surfaces as
@@ -1254,6 +1281,12 @@ impl OrbitApp {
             cx.notify();
             return;
         }
+        if self.guard_subagent_navigation(
+            subagents_ui::SubagentAction::NewGithubTask(workspace.clone(), prompt.clone()),
+            cx,
+        ) {
+            return;
+        }
         self.on_new_session_in_workspace(workspace, window, cx);
         self.input
             .update(cx, |input, cx| input.set_text(prompt, cx));
@@ -1279,6 +1312,12 @@ impl OrbitApp {
         cx: &mut Context<Self>,
     ) {
         if self.rewind_transition_pending(cx) {
+            return;
+        }
+        if self.guard_subagent_navigation(
+            subagents_ui::SubagentAction::NewSessionInWorkspace(cwd.clone()),
+            cx,
+        ) {
             return;
         }
         // Same workspace with a live idle process: reuse it in place. A run
@@ -3231,6 +3270,12 @@ impl OrbitApp {
         display: String,
         cx: &mut Context<Self>,
     ) {
+        if self.guard_subagent_navigation(
+            subagents_ui::SubagentAction::OpenFile(path.clone(), display.clone()),
+            cx,
+        ) {
+            return;
+        }
         self.settings_open = false;
         self.git_open = false;
         self.usage_open = false;
