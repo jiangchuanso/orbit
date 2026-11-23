@@ -138,7 +138,7 @@
   --slab: #1b1c20;
   --ink: rgba(255, 255, 255, 0.94);
   --ink-2: rgba(255, 255, 255, 0.62);
-  --ink-3: rgba(255, 255, 255, 0.42);
+  --ink-3: rgba(255, 255, 255, 0.52);
   --hair: rgba(255, 255, 255, 0.08);
   --dash: rgba(255, 255, 255, 0.1);
   --brand: #5b9dff;
@@ -235,7 +235,7 @@ html:not(.dark) {
   --slab: #e3e3e7;
   --ink: rgba(0, 0, 0, 0.9);
   --ink-2: rgba(0, 0, 0, 0.62);
-  --ink-3: rgba(0, 0, 0, 0.44);
+  --ink-3: rgba(0, 0, 0, 0.58);
   --hair: rgba(0, 0, 0, 0.09);
   --dash: rgba(0, 0, 0, 0.12);
   --brand: #2f6fe0;
@@ -883,6 +883,18 @@ body {
 
 .tour-tabs::-webkit-scrollbar {
   display: none;
+}
+
+/* A close crop of the app (no window chrome of its own) sits in a window's
+ * edge; its text runs off the right side, so that side fades instead of
+ * slicing a word in half. */
+.shot-framed {
+  overflow: hidden;
+}
+
+.shot-framed img {
+  -webkit-mask-image: linear-gradient(to right, #000 82%, transparent 99%);
+  mask-image: linear-gradient(to right, #000 82%, transparent 99%);
 }
 
 @media (prefers-reduced-motion: no-preference) {

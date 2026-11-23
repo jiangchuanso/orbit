@@ -3057,6 +3057,44 @@ pub(super) enum WorkInRow {
     /// Put this project on a server (git clone there plus its ignored
     /// files), offered under the hosts once there is a host to go to.
     AddToServer,
+    /// Configure a new SSH host (Settings → Remote hosts, form open). Always
+    /// the Remote section's last row, so the section exists — and says how
+    /// to start — before any host is set up (#166).
+    AddRemoteHost,
+}
+
+impl WorkInRow {
+    /// Whether the row belongs to the Remote section rather than this device.
+    pub(super) fn is_remote_section(&self) -> bool {
+        matches!(self, Self::Remote(_) | Self::AddToServer | Self::AddRemoteHost)
+    }
+}
+
+/// The section a Work in row opens, if it is the first row of one: **This
+/// device** over the local places, **Remote** over the hosts. A one-row
+/// picker (a session, which only says where it runs) has no sections.
+pub(super) fn work_in_section_start(rows: &[WorkInRow], ix: usize) -> Option<WorkInSection> {
+    if rows.len() < 2 {
+        return None;
+    }
+    let row = rows.get(ix)?;
+    let starts = match ix.checked_sub(1).and_then(|prev| rows.get(prev)) {
+        None => true,
+        Some(prev) => prev.is_remote_section() != row.is_remote_section(),
+    };
+    starts.then(|| {
+        if row.is_remote_section() {
+            WorkInSection::Remote
+        } else {
+            WorkInSection::Device
+        }
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WorkInSection {
+    Device,
+    Remote,
 }
 
 impl OrbitApp {
@@ -3067,12 +3105,13 @@ impl OrbitApp {
             .or_else(|| self.main_worktree_path())
     }
 
-    /// The picker's rows, in the order a place is chosen: the current
+    /// The picker's rows, in two sections. **This device**: the current
     /// checkout (the main one), the worktree the task runs in now when that is
     /// not the main checkout — so the check is always on screen — then **New
-    /// worktree**, **Existing worktrees** (when the repository has any; the
-    /// list itself is the flyout), each enabled remote host, and **Add this
-    /// project to a server** under them. The new-task page's folder picker
+    /// worktree** and **Existing worktrees** (when the repository has any; the
+    /// list itself is the flyout). **Remote**: each enabled host, **Add this
+    /// project to a server** once there is a host, and **Add remote host…**
+    /// always, so the way to a server is never hidden (#166). The new-task page's folder picker
     /// lists folders only, so every *where* lives here. `None` when
     /// there is no repository, so the control hides and non-worktree projects
     /// are unchanged (§39).
@@ -3111,6 +3150,7 @@ impl OrbitApp {
         if !self.work_in_hosts.is_empty() {
             rows.push(WorkInRow::AddToServer);
         }
+        rows.push(WorkInRow::AddRemoteHost);
         Some(rows)
     }
 
@@ -3481,6 +3521,14 @@ impl OrbitApp {
                 self.close_work_in_menu(window, cx);
                 self.open_server_clone(None, window, cx);
             }
+            WorkInRow::AddRemoteHost => {
+                // The host form is painted by Settings → Remote hosts, so it
+                // opens there, with the form already up.
+                self.close_work_in_menu(window, cx);
+                self.open_settings(cx);
+                self.set_settings_section(SettingsSection::RemoteHosts, cx);
+                self.remote_host_add(window, cx);
+            }
         }
     }
 
@@ -3614,7 +3662,7 @@ impl OrbitApp {
             .id("work-in-list")
             .debug_selector(|| "work-in-list".to_string())
             .w_full()
-            .max_h(px(320.))
+            .max_h(px(360.))
             .overflow_y_scroll()
             .track_scroll(&self.work_in_scroll)
             .py(picker::list_padding_y(&theme))
@@ -3622,22 +3670,15 @@ impl OrbitApp {
             .flex_col()
             .gap(picker::row_gap(&theme));
         for (ix, row) in rows.iter().enumerate() {
-            // Three groups in one list — this device's places (current
-            // checkout, new worktree), the existing worktrees, the remote
-            // hosts — each opened by a hairline where it starts.
-            let group_start = ix > 0
-                && match row {
-                    WorkInRow::ExistingWorktrees { .. } => true,
-                    WorkInRow::Remote(_) => !matches!(rows[ix - 1], WorkInRow::Remote(_)),
-                    // Joins the hosts it acts on, under the same hairline.
-                    WorkInRow::AddToServer => false,
-                    _ => false,
-                };
+            // Two sections in one list — This device, then Remote — each
+            // named by a quiet label where it starts. Space and the label
+            // group the rows; no hairline is needed between them.
+            let section = work_in_section_start(&rows, ix);
             list = list.child(self.work_in_row(
                 ix,
                 row,
                 ix == selected_ix,
-                group_start,
+                section,
                 &theme,
                 this.clone(),
             ));
@@ -3851,16 +3892,15 @@ impl OrbitApp {
         .into_any_element()
     }
 
-    /// One row of the picker: this device, or a remote host. Both are two-line
-    /// rows — the place over where it runs — so the list never mixes heights.
-    /// `group_start` draws the hairline above the first host inside that row's
-    /// own box, so `scroll_to_item` keeps counting rows one for one.
+    /// One row of the picker: a place on this device, a remote host, or an
+    /// action. A row that opens a section carries that section's label inside
+    /// its own box, so `scroll_to_item` keeps counting rows one for one.
     fn work_in_row(
         &self,
         ix: usize,
         row: &WorkInRow,
         selected: bool,
-        group_start: bool,
+        section: Option<WorkInSection>,
         theme: &Theme,
         this: gpui::WeakEntity<OrbitApp>,
     ) -> AnyElement {
@@ -3869,7 +3909,7 @@ impl OrbitApp {
         let opens_flyout = matches!(row, WorkInRow::ExistingWorktrees { .. });
         let highlighted = ix == self.work_in_menu_highlight.highlighted()
             || (opens_flyout && self.work_in_flyout_open);
-        let (icon_path, label, detail, prunable) = match row {
+        let (icon_path, label, detail, mono, prunable) = match row {
             WorkInRow::Folder(folder) => {
                 let icon_path = match &folder.folder.location {
                     crate::working_folder::Location::Local => "icons/monitor.svg",
@@ -3881,6 +3921,7 @@ impl OrbitApp {
                     icon_path,
                     folder.label.clone(),
                     folder.detail.clone(),
+                    true,
                     folder.prunable,
                 )
             }
@@ -3891,17 +3932,20 @@ impl OrbitApp {
                 tr!("working_folder.new_worktree"),
                 None,
                 false,
+                false,
             ),
             WorkInRow::ExistingWorktrees { .. } => (
                 WORKTREE_ICON,
                 tr!("working_folder.existing_worktrees"),
                 None,
                 false,
+                false,
             ),
             WorkInRow::Remote(host) => (
                 "icons/server-stack.svg",
                 tr!("remote.host_row", host = host.name.clone()),
                 Some(host.location()),
+                true,
                 false,
             ),
             WorkInRow::AddToServer => (
@@ -3909,27 +3953,57 @@ impl OrbitApp {
                 tr!("server_clone.picker_row"),
                 None,
                 false,
+                false,
+            ),
+            // Prose, not a location: the hint reads in the UI family.
+            WorkInRow::AddRemoteHost => (
+                "icons/plus.svg",
+                tr!("working_folder.add_remote_host"),
+                Some(tr!("working_folder.add_remote_host_hint")),
+                false,
+                false,
             ),
         };
         let count = match row {
             WorkInRow::ExistingWorktrees { count } => Some(*count),
             _ => None,
         };
-        // Remote hosts are experimental; the row says so where the machine
-        // is chosen, on the title's line.
-        let experimental = matches!(row, WorkInRow::Remote(_));
+        // Remote hosts are experimental; the Remote section's label says so
+        // once, instead of a tag on every host row.
         let anchor = opens_flyout.then(|| self.work_in_existing_bounds.clone());
         let this_row = this;
+        let header = section.map(|section| {
+            let label = match section {
+                WorkInSection::Device => tr!("working_folder.section_device"),
+                WorkInSection::Remote => tr!("working_folder.section_remote"),
+            };
+            // The first section sits at the list's top edge; a later one
+            // takes the menu's section break above its label.
+            let header = if ix == 0 {
+                crate::ui::menu::menu_header(label, theme)
+            } else {
+                crate::ui::menu::menu_section_header(label, theme)
+            };
+            header
+                .debug_selector(move || format!("work-in-section-{ix}"))
+                .items_center()
+                .when(section == WorkInSection::Remote, |header| {
+                    header.child(
+                        div()
+                            .flex_none()
+                            .pr(DynamicSpacing::Base06.px(theme))
+                            .child(crate::ui::chip::experimental_tag(theme)),
+                    )
+                })
+        });
         div()
-            .debug_selector(move || format!("work-in-row-{ix}"))
-            .when(group_start, |cell| {
-                cell.border_t_1().border_color(theme.hairline())
-            })
+            .children(header)
             .child(
                 picker_entry(
                     div().id(ElementId::NamedInteger("work-in-entry".into(), ix as u64)),
                     theme,
                 )
+                .debug_selector(move || format!("work-in-row-{ix}"))
                 // Only the highlight fills a row; the place in force is said
                 // by its check and Medium ink, not by a second filled slab.
                 .when(highlighted, |row| row.bg(theme.selected_wash()))
@@ -3978,22 +4052,22 @@ impl OrbitApp {
                     .icon(icon_path, theme.text_muted)
                     .weight(FontWeight::MEDIUM);
                     if let Some(detail) = detail {
-                        body = body.detail(detail).mono();
+                        body = body.detail(detail);
+                        if mono {
+                            body = body.mono();
+                        }
                     }
                     body.into_element(theme)
                 })
                 // Trailing items share the title's line, not the gap between
                 // the title and its detail.
                 .items_start()
-                .when(prunable || count.is_some() || selected || experimental, |row| {
+                .when(prunable || count.is_some() || selected, |row| {
                     row.child(
                         picker_title_slot(theme)
                             .children(
                                 prunable.then(|| work_in_tag(tr!("working_folder.prunable"), theme)),
                             )
-                            .when(experimental, |slot| {
-                                slot.child(crate::ui::chip::experimental_tag(theme))
-                            })
                             // The submenu row: how many worktrees wait behind
                             // it, and the chevron that says it opens aside.
                             .when_some(count, |slot, count| {

@@ -215,30 +215,13 @@ pub(crate) trait ControlExt: InteractiveElement + Styled + Sized {
         self.hover(|style| style.opacity(0.9))
     }
 
-    /// Focus: the 1px ring, drawn from the token, on every focusable control.
-    /// A no-op on an element that cannot take focus.
-    ///
-    /// On its own this adds the ring's border only while focused, which costs
-    /// layout on an element with no border at rest. A control that takes focus
-    /// uses [`Self::focus_ring_reserved`] instead.
-    fn focus_state(self, theme: &Theme) -> Self {
-        let ring = InteractionState::Focused
-            .border(theme)
-            .expect("Focused draws the ring");
-        self.focus(move |style| style.border_1().border_color(ring))
-    }
-
-    /// [`Self::focus_state`] at no layout cost: the ring's 1px is reserved at
-    /// rest as a transparent border, so taking focus only changes the edge's
-    /// colour. Adding the border on focus alone grew a borderless control by
-    /// 2px and shifted everything after it — the new-task folder control moved
-    /// its row each time the folder picker closed and handed focus back. A
-    /// caller that draws its own hairline sets its colour after this, and the
-    /// ring still wins while focused.
-    fn focus_ring_reserved(self, theme: &Theme) -> Self {
-        self.border_1()
-            .border_color(gpui::transparent_black())
-            .focus_state(theme)
+    /// The 1px edge a focusable control keeps at rest, transparent. Orbit
+    /// draws no focus ring (keyboard focus still moves, it is just not
+    /// painted), but the edge stays reserved so every control keeps the size
+    /// it was laid out at. A caller that draws its own hairline sets its
+    /// colour after this.
+    fn focus_ring_reserved(self, _theme: &Theme) -> Self {
+        self.border_1().border_color(gpui::transparent_black())
     }
 }
 

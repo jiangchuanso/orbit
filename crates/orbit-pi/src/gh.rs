@@ -340,6 +340,55 @@ pub fn list_issues(cwd: &Path, filter: &IssueFilter) -> Result<Vec<GhIssue>, Str
     parse_json(&run(cwd, &args)?)
 }
 
+/// The repository's `owner/name`, as `gh` resolves it for `cwd`. The Git
+/// button keys what the user has seen by it, so every clone and worktree of
+/// one repository shares that state.
+pub fn repo_name(cwd: &Path) -> Result<String, String> {
+    let name = run(
+        cwd,
+        &["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
+    )?;
+    let name = name.trim();
+    if name.is_empty() {
+        Err(tr!("git_activity.no_repository"))
+    } else {
+        Ok(name.to_owned())
+    }
+}
+
+/// When each open issue (or pull request) was opened, and by whom — the
+/// newest 50, which is all the Git button's "new" count reads. Asks for two
+/// fields only, so the background check stays one small request per list.
+pub fn open_stamps(
+    cwd: &Path,
+    kind: crate::git_activity::Kind,
+) -> Result<Vec<crate::git_activity::Stamp>, String> {
+    #[derive(Deserialize)]
+    struct Row {
+        #[serde(rename = "createdAt", default)]
+        created_at: String,
+        #[serde(default)]
+        author: Option<GhUser>,
+    }
+    let noun = match kind {
+        crate::git_activity::Kind::Issues => "issue",
+        crate::git_activity::Kind::Pulls => "pr",
+    };
+    let rows: Vec<Row> = parse_json(&run(
+        cwd,
+        &[
+            noun, "list", "--state", "open", "--limit", "50", "--json", "createdAt,author",
+        ],
+    )?)?;
+    Ok(rows
+        .into_iter()
+        .map(|row| crate::git_activity::Stamp {
+            created_at: row.created_at,
+            author: row.author.map(|author| author.login),
+        })
+        .collect())
+}
+
 /// One issue with its comments.
 pub fn view_issue(cwd: &Path, number: u64) -> Result<GhIssue, String> {
     let number = number.to_string();

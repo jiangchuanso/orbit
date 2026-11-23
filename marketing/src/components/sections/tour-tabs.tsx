@@ -19,6 +19,8 @@ export type TourItem = {
     height: number;
     /** A tall, narrow capture (the session list) is shown at a column's width. */
     narrow?: boolean;
+    /** A close crop with no window chrome of its own: framed so its cut edges read as a window's. */
+    crop?: boolean;
   };
 };
 
@@ -89,7 +91,7 @@ export function TourTabs({ items, label }: { items: TourItem[]; label: string })
               tabIndex={selected ? 0 : -1}
               onClick={() => setActive(index)}
               onKeyDown={(event) => onKeyDown(event, index)}
-              className={`h-9 shrink-0 rounded-full px-4 text-[13px] whitespace-nowrap transition-colors ${
+              className={`h-11 shrink-0 rounded-full px-4 text-[14px] whitespace-nowrap transition-colors ${
                 selected
                   ? "bg-ink text-page"
                   : "text-ink-2 hover:bg-tint-0a hover:text-ink"
@@ -105,21 +107,21 @@ export function TourTabs({ items, label }: { items: TourItem[]; label: string })
         id="tour-panel"
         role="tabpanel"
         aria-labelledby={`tour-tab-${item.id}`}
-        className="mt-10 grid grid-cols-1 items-center gap-10 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] lg:gap-14"
+        className="mt-10 grid grid-cols-1 items-start gap-10 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] lg:gap-14"
       >
         <div key={`copy-${item.id}`} className="tour-in">
-          <h3 className="m-0 max-w-[22ch] text-balance [word-break:auto-phrase] text-[clamp(26px,2.6vw,34px)] font-semibold leading-[1.18] tracking-[-0.022em] text-ink">
+          <h3 className="m-0 max-w-[22ch] text-balance [word-break:auto-phrase] text-[clamp(24px,2.2vw,30px)] font-semibold leading-[1.2] tracking-[-0.022em] text-ink">
             {item.title}
           </h3>
-          <p className="mt-4 max-w-[46ch] text-[14.5px] leading-[1.75] text-ink-2">{item.copy}</p>
+          <p className="mt-4 max-w-[46ch] text-[15px] leading-[1.75] text-ink-2">{item.copy}</p>
           {item.points.length ? (
             <ul className="mt-7 flex flex-col">
               {item.points.map((point) => (
                 <li
                   key={point}
-                  className="flex gap-3 border-t border-edge-subtle py-3.5 text-[13px] leading-[1.65] text-ink-2 last:border-b"
+                  className="flex gap-3 border-t border-edge-subtle py-3.5 text-[14px] leading-[1.6] text-ink-2 last:border-b"
                 >
-                  <span aria-hidden className="mt-[9px] size-1 shrink-0 rounded-full bg-ink-3" />
+                  <span aria-hidden className="mt-[10px] size-1 shrink-0 rounded-full bg-ink-3" />
                   {point}
                 </li>
               ))}
@@ -134,6 +136,7 @@ export function TourTabs({ items, label }: { items: TourItem[]; label: string })
             alt={item.shot.alt}
             width={item.shot.width}
             height={item.shot.height}
+            framed={item.shot.crop}
             className={item.shot.narrow ? "mx-auto w-full max-w-[340px]" : ""}
             sizes={item.shot.narrow ? "340px" : "(max-width: 1024px) 100vw, 680px"}
           />

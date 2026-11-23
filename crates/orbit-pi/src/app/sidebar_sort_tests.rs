@@ -324,6 +324,7 @@ fn workspace_marks_round_trip_through_the_store() {
         Some(&WorkspaceMark {
             icon: Some("rocket-01".into()),
             tint: Some("accent".into()),
+            name: None,
         })
     );
     // No mark stored for beta or the legacy bare path.
@@ -631,4 +632,40 @@ fn moving_a_session_persists_its_group_order(cx: &mut gpui::TestAppContext) {
             assert_eq!(crate::session_order::ranks().get(&a1), Some(&1));
         });
     });
+}
+
+/// A renamed project keeps its name across a save and a load; the folder path
+/// stays the key, and a project without one writes no `name` key (#166).
+#[test]
+fn a_project_name_round_trips_through_the_store() {
+    let alpha = PathBuf::from("/work/alpha");
+    let beta = PathBuf::from("/work/beta");
+    let mut store = WorkspaceStore {
+        workspaces: vec![alpha.clone(), beta.clone()],
+        ..WorkspaceStore::default()
+    };
+    store.marks.insert(
+        alpha.clone(),
+        WorkspaceMark {
+            name: Some("Website".into()),
+            ..WorkspaceMark::default()
+        },
+    );
+    let saved = workspace_store_json(&store);
+    assert_eq!(saved["workspaces"][0]["name"], "Website");
+    assert!(saved["workspaces"][1].get("name").is_none());
+
+    let restored = parse_workspace_store(&saved);
+    assert_eq!(
+        restored.marks.get(&alpha).and_then(|mark| mark.name.as_deref()),
+        Some("Website")
+    );
+    assert!(!restored.marks.contains_key(&beta));
+
+    // A hand-edited blank name is no name at all.
+    let blank: Value = serde_json::from_str(
+        r#"{ "workspaces": [ { "path": "/work/alpha", "added_at": 1, "name": "  " } ] }"#,
+    )
+    .expect("valid store JSON");
+    assert!(parse_workspace_store(&blank).marks.is_empty());
 }

@@ -872,9 +872,19 @@ impl Render for CommandPalette {
                                 .child(
                                     div()
                                         .font_weight(FontWeight::MEDIUM)
+                                        .line_height(picker::stack_line_height(
+                                            picker::TEXT,
+                                            &theme,
+                                        ))
                                         .child(tr!("command_palette.no_results")),
                                 )
-                                .child(div().text_size(picker::SECONDARY_TEXT.px(&theme)).child(
+                                .child(div()
+                                    .text_size(picker::SECONDARY_TEXT.px(&theme))
+                                    .line_height(picker::stack_line_height(
+                                        picker::SECONDARY_TEXT,
+                                        &theme,
+                                    ))
+                                    .child(
                                     tr!(
                                         "command_palette.try_a_session_title_a_command_or_a_setting"
                                     ),

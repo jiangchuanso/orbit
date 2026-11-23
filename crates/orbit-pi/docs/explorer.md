@@ -259,7 +259,7 @@ promises a restore the platform cannot deliver.
 | Layout + dispatch | `src/app/view.rs` | dock after sidebar; resize drag-move listener; Files branch in the `:612` dispatch chain; top-bar toggle |
 | Command palette | `src/command_palette.rs` | `PaletteCommand::ToggleProjectPanel`, `OpenFileFinder`; snapshot flags |
 | Watching | `src/app/events.rs` | consume `workspace_watcher` dirty → mark explorer stale |
-| i18n | `locales/en.yml` + `scripts/gen_locales.py` | new `explorer.*` keys |
+| i18n | `locales/en.yml` + each `locales/<locale>.yml` | new `explorer.*` keys |
 | Docs | `AGENTS.md`, `PRODUCT.md`, `CHANGELOG.md` | file map + capability + entry |
 
 ## Performance rules

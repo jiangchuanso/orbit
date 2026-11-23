@@ -203,8 +203,61 @@ fn the_panel_draws_on_the_right_edge(cx: &mut gpui::TestAppContext) {
     cx.update(|_, cx| app.update(cx, |app, cx| app.close_session_details(cx)));
     let _ = cx.draw(gpui::point(px(0.), px(0.)), viewport, |_, _| app.clone());
     assert!(
-        cx.debug_bounds("session-details-panel").is_none(),
-        "closing removes the dock"
+        cx.debug_bounds("session-details-panel").is_some(),
+        "the dock slides out on `Motion::Layout`, so it is still mounted on the \
+         first frame after the close"
+    );
+    // Run the frames the slide asked for — this test has no clock of its own —
+    // then ask the render itself what the slot mounts. `debug_bounds` reports
+    // the last frame the test host swapped in, which does not follow every
+    // `draw` here; the mount rule is asserted exactly, and headless, in
+    // `motion::panel::tests`.
+    crate::motion::panel::settle(crate::motion::panel::RIGHT_DOCK, false);
+    let mounted = cx.update(|window, cx| {
+        let theme = *crate::theme::get(cx);
+        app.update(cx, |app, cx| app.right_dock_slide(theme, &*window, cx))
+    });
+    assert!(
+        mounted.is_none(),
+        "the slot mounts no dock once it has slid shut"
+    );
+}
+
+/// The slot remembers which dock held it. By the time a close is animating,
+/// every `*_visible` flag is already false, so without that memory the slide
+/// would be moving an empty frame instead of the card being dismissed.
+#[gpui::test]
+fn a_closing_dock_keeps_painting_its_own_card(cx: &mut gpui::TestAppContext) {
+    let (app, cx) = new_app(cx);
+
+    let slide = |cx: &mut gpui::VisualTestContext| {
+        cx.update(|window, cx| {
+            let theme = *crate::theme::get(cx);
+            app.update(cx, |app, cx| app.right_dock_slide(theme, &*window, cx))
+        })
+    };
+
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            // The test host is not asked to have pi installed to lay out.
+            for dependency in &mut app.deps {
+                dependency.installed = true;
+            }
+            app.open_session_details(cx);
+        });
+    });
+    assert!(slide(cx).is_some(), "an open dock mounts its card");
+    assert_eq!(
+        cx.update(|_, cx| app.read(cx).right_dock_slot),
+        RightDock::Details
+    );
+
+    cx.update(|_, cx| app.update(cx, |app, cx| app.close_session_details(cx)));
+    assert!(slide(cx).is_some(), "the card stays mounted for the slide");
+    assert_eq!(
+        cx.update(|_, cx| app.read(cx).right_dock_slot),
+        RightDock::Details,
+        "the slot still knows which card is on its way out"
     );
 }
 

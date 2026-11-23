@@ -43,7 +43,7 @@ export async function Architecture({ locale }: { locale: Locale }) {
                     {node.mono}
                   </code>
                 ) : null}
-                <span className="mt-2 text-[12.5px] leading-[1.6] text-ink-2">{node.detail}</span>
+                <span className="mt-2 text-[13.5px] leading-[1.6] text-ink-2">{node.detail}</span>
               </div>
               {index < nodes.length - 1 ? (
                 <span aria-hidden className="grid place-items-center text-ink-3">
@@ -61,7 +61,7 @@ export async function Architecture({ locale }: { locale: Locale }) {
         <dl className="mt-10 grid grid-cols-2 gap-px overflow-hidden rounded-[16px] border border-edge-default bg-edge-subtle lg:grid-cols-4">
           {stats.map((stat) => (
             <div key={stat.label} className="flex flex-col-reverse justify-end bg-page px-6 py-6">
-              <dt className="mt-2.5 text-[12.5px] leading-[1.5] text-ink-2">{stat.label}</dt>
+              <dt className="mt-2.5 text-[13.5px] leading-[1.5] text-ink-2">{stat.label}</dt>
               <dd className="m-0 whitespace-nowrap text-[34px] font-semibold leading-none tracking-[-0.03em] text-ink">
                 {stat.value}
               </dd>

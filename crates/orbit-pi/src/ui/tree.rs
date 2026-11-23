@@ -14,13 +14,13 @@ use gpui::{
     Pixels, SharedString, Stateful, Styled,
 };
 
+use crate::motion::Hover;
 use crate::theme::{
     tokens::{DynamicSpacing, IconSize, Radius, TextSize},
     Theme,
 };
 use crate::ui::icon::{disclosure_chevron, icon};
 use crate::ui::row::RowState;
-use crate::ui::style::control::ControlExt;
 
 /// The left inset of a depth-0 directory row (its chevron's leading edge).
 const INDENT_BASE: f32 = 7.;
@@ -78,7 +78,6 @@ pub(crate) struct TreeRow {
     height: Pixels,
     state: TreeRowState,
     guides: bool,
-    focus_ring: bool,
     trailing: Vec<AnyElement>,
 }
 
@@ -98,7 +97,6 @@ impl TreeRow {
             height: px(28.),
             state: TreeRowState::Rest,
             guides: false,
-            focus_ring: false,
             trailing: Vec::new(),
         }
     }
@@ -120,12 +118,6 @@ impl TreeRow {
         self
     }
 
-    /// Ring the row (the selected row while the tree has keyboard focus),
-    /// without changing its layout or its fill.
-    pub(crate) fn focus_ring(mut self, focus_ring: bool) -> Self {
-        self.focus_ring = focus_ring;
-        self
-    }
 
     /// An inline editor in place of the name (a rename `ComposerInput`).
     /// Trailing marks are dropped while it shows.
@@ -140,7 +132,7 @@ impl TreeRow {
         self
     }
 
-    pub(crate) fn render(self, theme: &Theme) -> Stateful<gpui::Div> {
+    pub(crate) fn render(self, theme: &Theme) -> crate::motion::Hovered<Stateful<gpui::Div>> {
         let directory = matches!(self.node, TreeNode::Directory { .. });
         let selected = self.state == TreeRowState::Selected;
         let mark_ink = if selected {
@@ -173,7 +165,8 @@ impl TreeRow {
             TreeRowState::Cursor => row
                 .cursor_pointer()
                 .bg(RowState::Cursor.rest_fill(theme).unwrap_or_default()),
-            TreeRowState::Rest => row.cursor_pointer().hover_state(theme),
+            // The fade at the end owns the rest state's hover.
+            TreeRowState::Rest => row.cursor_pointer(),
         };
 
         if self.guides {
@@ -214,11 +207,13 @@ impl TreeRow {
             Some(editor) => row.child(div().flex().flex_1().min_w_0().child(editor)),
             None => row
                 .child(
+                    // Ellipsized, not clipped: a cut-off name shows that it
+                    // is cut off. The caller supplies the way to the full
+                    // name (the Explorer's row tooltip).
                     div()
                         .min_w_0()
                         .flex_1()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
+                        .truncate()
                         .text_size(TextSize::Small.px(theme))
                         .when_dir(directory, |el| el.font_weight(FontWeight::MEDIUM))
                         .text_color(name_ink)
@@ -227,18 +222,14 @@ impl TreeRow {
                 .children(self.trailing),
         };
 
-        if self.focus_ring {
-            row = row.child(
-                div()
-                    .debug_selector(|| "tree-row-focus-ring".to_string())
-                    .absolute()
-                    .inset_0()
-                    .rounded(Radius::Medium.px(theme))
-                    .border_1()
-                    .border_color(theme.focus_ring),
-            );
-        }
-        row
+        // Only the resting row has a hover; a selected, cursor or editing row
+        // carries its own fill and must not cross-fade away from it.
+        let hover = if self.state == TreeRowState::Rest {
+            Hover::row(theme)
+        } else {
+            Hover::none()
+        };
+        crate::motion::fade(row, self.id, theme, hover)
     }
 }
 

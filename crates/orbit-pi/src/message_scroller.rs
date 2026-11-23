@@ -410,12 +410,15 @@ fn render_jump_button(state: MessageScrollerState, theme: Theme) -> impl IntoEle
                         .items_center()
                         .justify_center()
                         .child(
+                            // No optical nudge: `arrow-down.svg` is drawn on
+                            // its 24×24 box's centre (shaft at x 12, y 5–19),
+                            // so the box's centre is the arrow's. A 1px
+                            // up-left nudge here used to pull it visibly off
+                            // the ring's centre.
                             svg()
+                                .debug_selector(|| "message-scroller-jump-arrow".to_string())
                                 .path("icons/arrow-down.svg")
                                 .size_full()
-                                // The arrow's stroke reads low and right inside
-                                // the circular frame despite its centered box.
-                                .when(!unread, |icon| icon.relative().left(px(-1.)).top(px(-1.)))
                                 .text_color(theme.text_primary),
                         ),
                 )
@@ -555,6 +558,18 @@ mod tests {
         );
         assert_eq!(
             center(icon.origin.y, icon.size.height),
+            center(button.origin.y, button.size.height)
+        );
+        // The glyph itself sits on the ring's centre too, not nudged off it.
+        let arrow = cx
+            .debug_bounds("message-scroller-jump-arrow")
+            .expect("jump arrow");
+        assert_eq!(
+            center(arrow.origin.x, arrow.size.width),
+            center(button.origin.x, button.size.width)
+        );
+        assert_eq!(
+            center(arrow.origin.y, arrow.size.height),
             center(button.origin.y, button.size.height)
         );
     }

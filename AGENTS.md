@@ -83,8 +83,8 @@ crates/orbit-pi/        GPUI app — window, shell, chat, settings
                         draining while no window is open
   src/commands.rs       command registry (D13): keymap rows, palette metadata, and the shortcut reference
   src/i18n.rs           AppLanguage + locale detection; the `tr!`/`tr_cow!` macros
-  locales/              translations: en.yml is the source of truth, one file per locale
-                        (generated from en.yml + scripts/i18n_glossary*.py)
+  locales/              translations: en.yml is the source of truth for keys, one hand-edited
+                        file per locale (kept in step by scripts/check_i18n.py --sync)
   src/app.rs            OrbitApp state model + shared types + controller wiring (module map in the file header)
   src/backdrop.rs       the new-task page's backdrop: a painted ordered-dither field (8×8 Bayer screen,
                         four dot sizes) with the app monogram screened into it and a light that crosses it
@@ -132,6 +132,12 @@ crates/orbit-pi/        GPUI app — window, shell, chat, settings
   src/app/toast_ui.rs   in-app toast stack: push/dismiss helpers + the bottom-right layer
   src/app/right_dock_ui.rs  the right pane's tabs: Review + delegated subagents opened from a card
                         (strip, controller, the subagent view in the shared `dock_shell` frame)
+  src/app/git_activity_ui.rs  the sidebar Git button's GitHub half: the background `gh` check
+                        (every 5 min + window activation), marking Issues / Pull requests seen
+                        on arrival, the Settings → Privacy switch and the button's tooltip
+  src/git_activity.rs   what the Git button flags: changed files + new issues / PRs, "new" =
+                        opened after the last view, `~/.orbit-pi/git-activity.json` (switch +
+                        per-`owner/name` view times, first sight baselined)
   src/app/repo_star.rs  Settings → About's Star / Starred button: reads and toggles the user's
                         star on Orbit's repo through their signed-in `gh` (browser fallback)
   src/app/view.rs       top-level chrome: sidebar, transcript, composer, status bar, onboarding, image lightbox
@@ -149,6 +155,9 @@ crates/orbit-pi/        GPUI app — window, shell, chat, settings
                         (measure.rs);
                         see docs/mermaid.md — anything outside the subset keeps the source block
   src/composer.rs       multi-line EntityInputHandler (wraps, auto-grows, scrolls)
+  src/spellcheck.rs     composer spelling marks + right-click suggestions: which spans are
+                        prose, and the AppKit `NSSpellChecker` calls behind them
+                        (macOS; no grammar, no autocorrect)
   src/model_selector.rs model / thinking picker popover
   src/notifications.rs  background notifications + channel prefs in ~/.orbit-pi/notifications.json: desktop banners (UNUserNotificationCenter; its delegate routes a clicked banner back to the session; osascript fallback when unbundled), system alert sound, and in-app toasts (the frontmost-window stand-in for the banner)
   src/toast.rs          the toast stack model: kinds, TTLs, fade, dedupe, cap (painted by app/toast_ui.rs)
@@ -416,7 +425,7 @@ a second component library.
 | `git` | every Git operation, worktrees, plugins from git URLs | No `git2`/libgit2. Run off-thread, read the exit code and stderr, and surface them. |
 | `gh` | issues, pull requests, auth status, attachments | May be missing or signed out: branch on that instead of assuming, and fall back to the web flow. |
 | `node` | extension and plugin installs, `node --test` | The first-run check reports it missing; never shell to it from a render path. |
-| `python3` | repo scripts, stdlib only | `scripts/gen_locales.py`, `scripts/check_i18n.py`, codemods. Not a runtime dependency. |
+| `python3` | repo scripts, stdlib only | `scripts/check_i18n.py` and the other `check_*` guards, release tooling. Not a runtime dependency. |
 | `cargo` | build, test, clippy, `cargo doc` | `cargo build --workspace` stays warning-free. |
 
 ### Already solved in-repo — do not add a crate for these
@@ -439,20 +448,24 @@ not cover it, and add it to the table above.
 Orbit collects no telemetry. There is no analytics crate, no installation
 identifier, and no network reporting of product usage; the app talks to the
 network only for things the user asked for — update checks, GitHub metadata
-for the UI, and the model providers the agent is configured to call. Do not
+for the UI, the images in Markdown the user opens (inline, through the bounded
+HTTPS client in `http.rs`), and the model providers the agent is configured to
+call. Do not
 reintroduce an analytics path. See [`PRIVACY.md`](PRIVACY.md) for what leaves
 the machine.
 
 ## Localization (i18n)
 
 UI copy is translated through [rust-i18n](https://github.com/longbridgeapp/rust-i18n).
-`locales/en.yml` is the **source of truth** — every key and its English text.
-The other nine locale files are generated, never hand-edited:
+`locales/en.yml` is the **source of truth** for keys, their order, their
+placeholders and the English text. Each of the other nine locale files holds
+that language's translations and is edited by hand; `check_i18n.py` keeps
+them in step with `en.yml`:
 
 ```
-python3 scripts/gen_locales.py        # regenerate locales/*.yml + report gaps
+python3 scripts/check_i18n.py --sync  # add/drop locale keys to match en.yml (keeps translations)
 cargo test -p orbit-pi --bin orbit-pi i18n  # completeness guard
-python3 scripts/check_i18n.py         # key + placeholder guard
+python3 scripts/check_i18n.py         # key, placeholder and locale-file guard
 python3 scripts/check_states.py       # interaction states must come from the contract
 python3 scripts/check_motion.py       # animations must use a motion primitive
 python3 scripts/check_keyboard.py     # every key binding lands in a declared context
@@ -473,9 +486,10 @@ python3 scripts/read-perf.py          # frame-time captures from a debug build (
   rust-i18n leaves an unbound `%{name}` literal in the rendered string.
   `scripts/check_i18n.py` fails on a key/placeholder mismatch, so run it after
   touching call sites.
-- **Translations** live in `scripts/i18n_glossary*.py`, keyed by the exact
-  English string from `en.yml`. Split by surface (core, settings, palette,
-  transcript). A string with no entry falls back to English.
+- **Translations** live in `locales/<locale>.yml`, under the same key as the
+  English. A value left in English is flagged as untranslated unless
+  `scripts/i18n_untranslated_baseline.json` lists it; a translation must keep
+  the English value's `%{…}` placeholders.
 - **Keys** are `surface.slug` (`settings.general`, `transcript.thinking`) so a
   translator sees context; identical English can appear under several keys.
 - **Native menu:** `set_app_menus` rebuilds the macOS menu bar when the
@@ -492,15 +506,15 @@ python3 scripts/read-perf.py          # frame-time captures from a debug build (
 
 1. Wrap the literal with `tr!("surface.slug")` at the call site.
 2. Add `surface.slug: "English"` to `locales/en.yml` (append; keep key order).
-3. Add `"English": "translation"` under each locale in the matching
-   `scripts/i18n_glossary_*.py`.
-4. Run `python3 scripts/gen_locales.py`, `python3 scripts/check_i18n.py`, and
+3. Run `python3 scripts/check_i18n.py --sync`: every locale gains the key, in
+   `en.yml`'s order, with the English text.
+4. Replace that English with the translation in each `locales/<locale>.yml`.
+5. Run `python3 scripts/check_i18n.py` and
    `cargo test -p orbit-pi --bin orbit-pi i18n` once after the string edits are complete.
 
-The codemods in `scripts/` (`localize_calls.py`, `localize_settings.py`,
-`localize_call_args.py`) wrap common GPUI builder patterns in bulk; run one,
-merge its key TSV into `en.yml`, then translate. They skip test code and
-`*_tests.rs` on purpose.
+Removing or renaming a key is the same: edit `en.yml`, run `--sync` (a removed
+key is dropped from every locale; a renamed one comes back in English, so
+carry its translations over).
 
 ## Current state
 
@@ -649,6 +663,7 @@ These compiled and ran against the pinned version. When in doubt, check
 | `enter` / `escape` / `up` / `down` | Confirm / deny / move | `Approval` (inline access-guard bar) |
 | `enter` / `space` | Fold / unfold the focused transcript activity summary, tool row or thought row | `ActivityToggle` |
 | `alt-up` / `alt-down` | Move the row under the cursor in the sidebar — a project group, or a session inside its project (the pointer twin is dragging a header or a session row) | `Sidebar` |
+| `pageup` / `pagedown` | Scroll the session preview while it is showing — the pointer's, or the one the cursor paints — because the arrows are already moving the row cursor. A no-op with no preview on screen | `Sidebar` |
 
 ## Pi CLI RPC protocol (official spec)
 
@@ -733,7 +748,7 @@ tests; a successful run with zero selected tests is not coverage.
 | Docs, guidance, comments only | Review the diff and run `git diff --check -- <changed-files>`. No Cargo, app launch, or release build. |
 | `orbit-pi` Rust code | `cargo check -p orbit-pi`; for changed logic, `cargo test -p orbit-pi --bin orbit-pi <filter>`. For UI behavior, exercise the affected flow through `bacon run`. |
 | `orbit-rpc` Rust code | `cargo check -p orbit-pi` (also checks its RPC dependency); `cargo test -p orbit-rpc --lib` and the relevant fake-server integration target, e.g. `cargo test -p orbit-rpc --test auth_fake_pi`. |
-| UI strings / locale glossaries | After editing English or glossaries, run `python3 scripts/gen_locales.py` once; then `python3 scripts/check_i18n.py` and `cargo test -p orbit-pi --bin orbit-pi i18n`. For call-site-only changes, skip regeneration and use the app-code checks plus the Python guard. |
+| UI strings / locale files | After adding or removing an `en.yml` key, run `python3 scripts/check_i18n.py --sync` once and translate the new lines; then `python3 scripts/check_i18n.py` and `cargo test -p orbit-pi --bin orbit-pi i18n`. For call-site-only changes, skip the sync and use the app-code checks plus the Python guard. |
 | `contrib/` extension or RPC patch | `node --test contrib/<changed-extension>/*.test.mjs`. Add Rust checks when Rust integration changes; build/run the app when validating the embedded extension behavior. |
 | `marketing/` only | Read `marketing/AGENTS.md`; run the applicable npm checks from that directory. No Cargo. |
 | Build, packaging, CI, dependency, or feature configuration | Validate the affected command/configuration; use the escalation rules below for Rust changes. |

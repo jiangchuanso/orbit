@@ -700,7 +700,11 @@ where
 }
 
 /// A quiet text button: the shared ghost variant at Compact size.
-fn ghost_button(id: String, label: &str, theme: Theme) -> gpui::Stateful<gpui::Div> {
+fn ghost_button(
+    id: String,
+    label: &str,
+    theme: Theme,
+) -> crate::motion::Hovered<gpui::Stateful<gpui::Div>> {
     Button::new(id, ButtonVariant::Ghost)
         .size(ButtonSize::Compact)
         .label(label.to_string())
@@ -709,7 +713,11 @@ fn ghost_button(id: String, label: &str, theme: Theme) -> gpui::Stateful<gpui::D
 }
 
 /// The one filled action on the page.
-fn primary_button(id: &'static str, label: &str, theme: Theme) -> gpui::Stateful<gpui::Div> {
+fn primary_button(
+    id: &'static str,
+    label: &str,
+    theme: Theme,
+) -> crate::motion::Hovered<gpui::Stateful<gpui::Div>> {
     Button::new(id, ButtonVariant::Primary)
         .label(label.to_string())
         .render(&theme)

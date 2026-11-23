@@ -209,6 +209,11 @@ fn row(
                 .child(
                     div()
                         .truncate()
+                        // Over a secondary line the pair stacks on the two-line
+                        // leading the row's height is measured from.
+                        .when(sub.is_some(), |text| {
+                            text.line_height(picker::stack_line_height(picker::TEXT, &theme))
+                        })
                         .when(selected, |text| text.font_weight(FontWeight::MEDIUM))
                         .text_color(if highlighted || selected {
                             theme.text_primary
@@ -220,7 +225,8 @@ fn row(
                 .children(sub.map(|sub| {
                     div()
                         .truncate()
-                        .text_size(TextSize::Small.px(&theme))
+                        .text_size(picker::SECONDARY_TEXT.px(&theme))
+                        .line_height(picker::stack_line_height(picker::SECONDARY_TEXT, &theme))
                         .text_color(theme.text_muted)
                         .child(sub.to_string())
                 })),

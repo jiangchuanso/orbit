@@ -17,7 +17,7 @@ use crate::theme::{
     Theme,
 };
 use crate::ui::icon::{icon, BUTTON_GROUP};
-use crate::ui::style::control::{press, ControlExt, TipExt};
+use crate::ui::style::control::{press, TipExt};
 
 // ── top-bar chip primitives ──
 
@@ -120,8 +120,8 @@ pub(crate) fn header_ghost_button(
     id: &'static str,
     theme: &Theme,
     child: impl IntoElement,
-) -> gpui::Stateful<gpui::Div> {
-    press(
+) -> crate::motion::Hovered<gpui::Stateful<gpui::Div>> {
+    let button = press(
         div()
             .id(id)
             .group(BUTTON_GROUP)
@@ -130,10 +130,11 @@ pub(crate) fn header_ghost_button(
             .flex()
             .items_center()
             .justify_center()
-            .cursor_pointer()
-            .hover_state(theme),
+            .cursor_pointer(),
     )
-    .child(child)
+    .child(child);
+    // A ghost control has no frame at rest, so its hover is the wash alone.
+    crate::motion::fade(button, id, theme, Hover::wash(theme))
 }
 
 /// Width of one caption button, matching the metric Windows uses for its own

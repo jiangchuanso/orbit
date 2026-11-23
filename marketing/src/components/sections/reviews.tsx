@@ -3,6 +3,8 @@ import { HugeiconsIcon } from "@hugeicons/react";
 
 import { UserAvatar } from "@/components/avatar";
 import { ReviewsScroller } from "@/components/reviews-scroller";
+import { ContributorsPanel } from "@/components/sections/contributors";
+import { SectionHead } from "@/components/sections/section-head";
 import { Band, Shell } from "@/components/ui";
 
 import { getT } from "@/i18n/t";
@@ -119,12 +121,12 @@ function ReviewCard({
       aria-hidden={dupe || undefined}
       className="mb-3 rounded-[14px] border border-edge-default bg-surface-1 p-5 shadow-card"
     >
-      <blockquote className="text-[13.5px] leading-[1.7] text-ink-2">
+      <blockquote className="text-[14px] leading-[1.7] text-ink-2">
         {review.quote}
       </blockquote>
       <figcaption className="mt-5 flex items-center gap-2.5">
         <UserAvatar handle={handle} />
-        <span className="truncate text-[12.5px] text-ink">{handle}</span>
+        <span className="truncate text-[13px] text-ink">{handle}</span>
         {dupe ? (
           <HugeiconsIcon
             icon={Icon}
@@ -193,19 +195,11 @@ export async function Reviews({ locale }: { locale: Locale }) {
   return (
     <Shell>
       <Band id="reviews" dashed className="scroll-mt-20 py-20 sm:py-28">
-        <div className="flex flex-col items-center text-center">
-          <h2 className="mt-0 max-w-[24ch] text-balance text-[clamp(30px,3.2vw,40px)] font-semibold leading-[1.18] tracking-[-0.024em] text-ink">
-            {t("heading")}
-          </h2>
-          <p className="mt-4 max-w-[48ch] text-[14.5px] leading-[1.75] text-ink-2">
-            {t("body")}
-          </p>
-        </div>
-
         <ReviewsScroller
           label={t("label")}
           pauseLabel={t("pause")}
           resumeLabel={t("resume")}
+          head={<SectionHead eyebrow={t("label")} title={t("heading")} copy={t("body")} />}
         >
           <div className="reviews-grid">
             {/* Phone: one column that cycles EVERY quote — below `sm` the
@@ -238,7 +232,7 @@ export async function Reviews({ locale }: { locale: Locale }) {
           </div>
         </ReviewsScroller>
 
-        <div className="mt-10 flex flex-wrap items-center justify-center gap-x-5 gap-y-2 text-[12px] text-ink-3">
+        <div className="mt-6 flex flex-wrap items-center gap-x-5 gap-y-2 text-[13px] text-ink-3">
           <a
             href={SUBREDDIT}
             target="_blank"
@@ -266,6 +260,8 @@ export async function Reviews({ locale }: { locale: Locale }) {
             @{X_HANDLE}
           </a>
         </div>
+
+        <ContributorsPanel locale={locale} />
       </Band>
     </Shell>
   );

@@ -106,14 +106,19 @@ impl ChoiceRow {
         let strong = self.highlighted || chosen;
         let line_h = theme.ui_px(18.);
 
+        // The label takes the line's remaining width (`flex_1`, a zero basis)
+        // and wraps inside it; the badge keeps its own width beside the first
+        // line. A label with an auto basis in a wrapping row was free to shrink
+        // to nothing under `min_w_0`, and then wrapped one glyph per line.
         let mut title = div()
             .min_w_0()
             .flex()
-            .flex_wrap()
-            .items_center()
+            .items_start()
             .gap(px(6.))
             .child(
                 div()
+                    .debug_selector(|| "choice-label".to_string())
+                    .flex_1()
                     .min_w_0()
                     .whitespace_normal()
                     .text_size(TextSize::Default.px(theme))
@@ -132,19 +137,22 @@ impl ChoiceRow {
             );
         if self.recommended {
             title = title.child(
-                div().debug_selector(|| "choice-recommended".to_string()).child(
-                    Badge::new(
-                        tr!("ask.recommended"),
-                        theme.accent_text,
-                        BadgeFill::Solid(theme.accent.opacity(0.14)),
-                    )
-                    .leading(icon(
-                        "icons/star.svg",
-                        IconSize::Indicator.px(theme),
-                        theme.accent_text,
-                    ))
-                    .render(theme),
-                ),
+                div()
+                    .debug_selector(|| "choice-recommended".to_string())
+                    .flex_none()
+                    .child(
+                        Badge::new(
+                            tr!("ask.recommended"),
+                            theme.accent_text,
+                            BadgeFill::Solid(theme.accent.opacity(0.14)),
+                        )
+                        .leading(icon(
+                            "icons/star.svg",
+                            IconSize::Indicator.px(theme),
+                            theme.accent_text,
+                        ))
+                        .render(theme),
+                    ),
             );
         }
 
@@ -236,6 +244,64 @@ fn mark(mark: ChoiceMark, theme: &Theme) -> gpui::Div {
 #[cfg(test)]
 mod tests {
     use super::split_recommended;
+    use super::{ChoiceMark, ChoiceRow};
+    use crate::theme::{Theme, ThemeId};
+    use gpui::{div, point, prelude::*, px, ElementId};
+
+    /// The decision card's chain: a full-width card, the scrolling options
+    /// column, a row — the label must lay out on one line at that width, never
+    /// one glyph per line.
+    #[gpui::test]
+    fn a_choice_label_wraps_at_the_row_width_not_per_glyph(cx: &mut gpui::TestAppContext) {
+        struct Probe(&'static str, Option<&'static str>, bool);
+        impl gpui::Render for Probe {
+            fn render(
+                &mut self,
+                _: &mut gpui::Window,
+                _: &mut gpui::Context<Self>,
+            ) -> impl IntoElement {
+                let theme = Theme::for_id(ThemeId::Orbit);
+                let mut row = ChoiceRow::new(
+                    ElementId::Name("probe-row".into()),
+                    ChoiceMark::Radio(true),
+                    self.0,
+                )
+                .recommended(self.2)
+                .highlighted(true);
+                if let Some(description) = self.1 {
+                    row = row.description(description);
+                }
+                div().w(px(600.)).flex().flex_col().child(
+                    div()
+                        .id("probe-options")
+                        .max_h(px(400.))
+                        .overflow_y_scroll()
+                        .px(px(6.))
+                        .flex()
+                        .flex_col()
+                        .child(row.render(&theme)),
+                )
+            }
+        }
+
+        cx.update(|cx| cx.set_global(Theme::for_id(ThemeId::Orbit)));
+        for (label, description, recommended) in [
+            ("Return only", None, false),
+            ("Return only", Some("Hand the review back without merging"), false),
+            ("Return only", None, true),
+        ] {
+            let (view, cx) =
+                cx.add_window_view(|_, _| Probe(label, description, recommended));
+            let _ = cx.draw(point(px(0.), px(0.)), gpui::size(px(700.), px(500.)), |_, _| {
+                view.clone()
+            });
+            let label_bounds = cx.debug_bounds("choice-label").expect("label laid out");
+            assert!(
+                label_bounds.size.width > px(60.) && label_bounds.size.height < px(24.),
+                "{label:?} (description {description:?}, recommended {recommended}) must be one line: {label_bounds:?}"
+            );
+        }
+    }
 
     #[test]
     fn recommended_marker_becomes_a_flag() {

@@ -283,6 +283,81 @@ fn provider_models_disclose_on_demand_and_on_a_model_search(cx: &mut gpui::TestA
     );
 }
 
+#[gpui::test]
+fn provider_local_model_search_filters_ids_and_names_independently(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| cx.set_global(Theme::for_id(ThemeId::Orbit)));
+    // Fresh windows avoid debug_bounds retaining previously painted chips.
+    for (query, first, second) in [
+        ("  ANTHROPIC-MODEL  ", true, false),
+        ("friendly", false, true),
+        ("no-such-model", false, false),
+        ("", true, true),
+    ] {
+        let window = cx.add_empty_window();
+        let app = window.update(|_, cx| {
+            let app = test_app_in(cx);
+            app.update(cx, |app, cx| {
+                app.settings_open = true;
+                app.settings_section = SettingsSection::Providers;
+                app.provider_models_open.insert("anthropic".into(), true);
+                app.provider_models_open.insert("opencode-go".into(), true);
+                app.available_models.push(ModelEntry {
+                    id: "second-model".into(),
+                    name: "Friendly display name".into(),
+                    provider: "anthropic".into(),
+                    context_window: None,
+                    thinking_levels: Vec::new(),
+                });
+                let _ = app.render_settings(cx);
+                app.provider_model_filters["anthropic"]
+                    .0
+                    .update(cx, |input, cx| input.set_text(query, cx));
+                app.toggle_provider_models("anthropic".into(), true, cx);
+                app.toggle_provider_models("anthropic".into(), false, cx);
+                assert_eq!(
+                    app.provider_model_filters["anthropic"].0.read(cx).text(),
+                    query
+                );
+                assert_eq!(app.provider_filter.read(cx).text(), "");
+                assert_eq!(
+                    app.provider_model_filters["opencode-go"].0.read(cx).text(),
+                    ""
+                );
+            });
+            app
+        });
+        let _ = window.draw(
+            gpui::point(gpui::px(0.), gpui::px(0.)),
+            gpui::size(gpui::px(1400.), gpui::px(3000.)),
+            move |_, _| app,
+        );
+        assert!(window
+            .debug_bounds("provider-model-search-anthropic")
+            .is_some());
+        assert_eq!(
+            window
+                .debug_bounds("provider-model-chip-anthropic-anthropic-model")
+                .is_some(),
+            first,
+            "{query}"
+        );
+        assert_eq!(
+            window
+                .debug_bounds("provider-model-chip-anthropic-second-model")
+                .is_some(),
+            second,
+            "{query}"
+        );
+        assert!(window
+            .debug_bounds("provider-model-chip-opencode-go-opencode-go-model")
+            .is_some());
+        assert!(
+            window.debug_bounds("provider-models-anthropic").is_some(),
+            "empty results keep the search section open"
+        );
+    }
+}
+
 /// At the smallest window the page supports, a provider row, its details line
 /// and its actions stay inside the settings column instead of clipping (the
 /// 3-column grid squeezed each card to ~200px and cut its actions off, and the

@@ -20,6 +20,8 @@ repository = "https://github.com/imrj05/orbit"
 # wheel-scroll fix: each event moves the live offset (the published listener
 # replays the whole gesture onto the offset from its first paint), and a
 # bottom-aligned tail is clamped to the real maximum so one notch can leave it.
+# `text_system/line.rs` + `elements/text.rs` add opt-in rounded "chip" run
+# backgrounds for inline code (see vendor/gpui/README.orbit.md §6).
 # Everything else is the published crate.
 [patch.crates-io]
 gpui = { path = "vendor/gpui" }

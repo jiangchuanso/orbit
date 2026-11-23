@@ -48,7 +48,7 @@ use crate::ui::button::{Button, ButtonVariant};
 use crate::agent_call_display::AgentCallDisplay;
 use crate::app::OrbitApp;
 use crate::context_meter::{format_tokens, hit_percent_label};
-use crate::highlight::{self, Token};
+use crate::highlight::{self, Token, TokenClass};
 use crate::message_scroller::{self, MessageScrollerState};
 use crate::motion::Hover;
 use crate::shimmer::ShimmerText;
@@ -74,12 +74,27 @@ use crate::ui::banner::{Banner, BannerTone};
 /// inspector glass wherever it frosts — the wallpaper's card tint over a
 /// picture, the contrast-floored tint over the bare workbench in dark
 /// palettes — and the opaque `overlay` plane everywhere else, so text never
-/// sits over an unblurred backdrop.
+/// sits over an unblurred backdrop. On a full-window wallpaper the chat column
+/// is already glass, so the card adds only the frost and a light lift
+/// ([`Theme::on_page_glass_fill`]) and reads as the sidebar's material.
 fn frosted_transcript_fill(theme: Theme) -> Hsla {
+    if let Some(fill) = theme.on_page_glass_fill(theme.surface_secondary) {
+        return fill;
+    }
     match theme.floating_glass_sigma() {
         Some(_) => theme.inspector_fill(theme.surface_secondary),
         None => theme.overlay,
     }
+}
+
+/// The code well inside a transcript card (a tool call's arguments and
+/// output): [`Theme::on_page_glass_well`] on a full-window wallpaper, so an
+/// open tool card is the same glass as every other card, and the
+/// contrast-floored [`Theme::inspector_well`] everywhere else.
+fn transcript_well_fill(theme: Theme) -> Hsla {
+    theme
+        .on_page_glass_well(theme.code_bg)
+        .unwrap_or_else(|| theme.inspector_well(theme.code_bg))
 }
 
 /// Opens the changed-files Review in the side pane (see `sidepane.rs`) —
@@ -3427,8 +3442,6 @@ fn render_activity_group(
                     .min_w_0()
                     .max_w_full()
                     .child(chip),
-                radius: crate::theme::tokens::button::radius(ButtonSize::Default).px(&theme),
-                theme,
                 toggle,
             }
         });
@@ -3749,8 +3762,6 @@ fn render_thinking_body(
                 SharedString::from(format!("thought-toggle-focus-{}-{}", key.0, key.1)),
                 toggle,
             )),
-            inspector_inner_radius(&theme),
-            theme,
         ));
     if !collapsed {
         card = card.child(
@@ -3826,7 +3837,9 @@ fn render_thinking_body(
                     let runs = highlight_runs(base_runs, range, selection_color(theme));
                     SelectableText::new(
                         body_key,
-                        StyledText::new(text.clone()).with_runs(runs),
+                        StyledText::new(text.clone())
+                            .with_runs(runs)
+                            .with_background_chips(inline_code_chip(&theme)),
                         text,
                         Vec::new(),
                         scope,
@@ -4143,8 +4156,8 @@ type SubagentRowToggleFn = Rc<dyn Fn(&mut App)>;
 type SubagentRowCloseFn = Rc<dyn Fn(&mut App) -> bool>;
 
 /// A delegation card's child row as a keyboard stop (§9.8): Tab reaches it,
-/// Enter or Space opens that child's log, Escape closes it, and a focused row
-/// wears the 1px ring over its fill without moving a pixel of layout.
+/// Enter or Space opens that child's log, and Escape closes it. Orbit paints no
+/// focus ring, so a focused row looks like any other.
 ///
 /// A pointer click opens the log but leaves keyboard focus where it was, so
 /// clicking a card mid-turn never pulls the caret out of the composer. The
@@ -4154,12 +4167,6 @@ type SubagentRowCloseFn = Rc<dyn Fn(&mut App) -> bool>;
 struct SubagentRowKeys {
     focus_id: SharedString,
     row: gpui::Stateful<gpui::Div>,
-    /// The card's first row shares its rounded top edge.
-    first: bool,
-    /// The card's last row shares its rounded bottom edge when nothing
-    /// follows it.
-    last: bool,
-    theme: Theme,
     toggle: SubagentRowToggleFn,
     close: SubagentRowCloseFn,
 }
@@ -4169,9 +4176,6 @@ impl RenderOnce for SubagentRowKeys {
         let SubagentRowKeys {
             focus_id,
             row,
-            first,
-            last,
-            theme,
             toggle,
             close,
         } = self;
@@ -4181,8 +4185,6 @@ impl RenderOnce for SubagentRowKeys {
             })
             .read(cx)
             .clone();
-        let focused = focus.is_focused(window);
-        let radius = panel::RADIUS.px(&theme);
         row.track_focus(&focus)
             .key_context("SubagentRow")
             // A click is pointer work: keep focus where the reader left it.
@@ -4196,18 +4198,6 @@ impl RenderOnce for SubagentRowKeys {
                 }
             })
             .relative()
-            .when(focused, |row| {
-                row.child(
-                    div()
-                        .debug_selector(|| "subagent-row-focus-ring".to_string())
-                        .absolute()
-                        .inset_0()
-                        .when(first, |ring| ring.rounded_t(radius))
-                        .when(last, |ring| ring.rounded_b(radius))
-                        .border_1()
-                        .border_color(theme.focus_ring),
-                )
-            })
     }
 }
 
@@ -4216,8 +4206,8 @@ type ActivityToggleFn = Rc<dyn Fn(&mut App)>;
 
 /// A transcript activity disclosure as a keyboard stop — an activity group's
 /// summary line, a tool row with detail, a thought row: Tab reaches it, Enter
-/// or Space folds or unfolds it through the same `toggle` a click runs, and a
-/// focused one wears the 1px `focus_ring` over itself without moving layout.
+/// or Space folds or unfolds it through the same `toggle` a click runs. No
+/// focus ring is painted.
 ///
 /// Same contract as [`SubagentRowKeys`]: a pointer click toggles but leaves
 /// keyboard focus where it was (the composer keeps its caret), and the handle
@@ -4227,9 +4217,6 @@ type ActivityToggleFn = Rc<dyn Fn(&mut App)>;
 struct ActivityToggleKeys {
     focus_id: SharedString,
     row: gpui::Stateful<gpui::Div>,
-    /// The ring's corner radius, matching the control it outlines.
-    radius: Pixels,
-    theme: Theme,
     toggle: ActivityToggleFn,
 }
 
@@ -4238,8 +4225,6 @@ impl RenderOnce for ActivityToggleKeys {
         let ActivityToggleKeys {
             focus_id,
             row,
-            radius,
-            theme,
             toggle,
         } = self;
         let focus = window
@@ -4248,24 +4233,12 @@ impl RenderOnce for ActivityToggleKeys {
             })
             .read(cx)
             .clone();
-        let focused = focus.is_focused(window);
         row.track_focus(&focus)
             .key_context("ActivityToggle")
             // A click is pointer work: keep focus where the reader left it.
             .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
             .on_action(move |_: &crate::ActivityToggle, _, cx| toggle(cx))
             .relative()
-            .when(focused, |row| {
-                row.child(
-                    div()
-                        .debug_selector(move || format!("{focus_id}-ring"))
-                        .absolute()
-                        .inset_0()
-                        .rounded(radius)
-                        .border_1()
-                        .border_color(theme.focus_ring),
-                )
-            })
     }
 }
 
@@ -4274,15 +4247,11 @@ impl RenderOnce for ActivityToggleKeys {
 fn activity_keys(
     row: gpui::Stateful<gpui::Div>,
     keys: Option<(SharedString, ActivityToggleFn)>,
-    radius: Pixels,
-    theme: Theme,
 ) -> AnyElement {
     match keys {
         Some((focus_id, toggle)) => ActivityToggleKeys {
             focus_id,
             row,
-            radius,
-            theme,
             toggle,
         }
         .into_any_element(),
@@ -4591,9 +4560,6 @@ fn render_subagent_card(
         card = card.child(SubagentRowKeys {
             focus_id: SharedString::from(format!("subagent-row-focus-{}-{}-{ix}", key.0, key.1)),
             row,
-            first: ix == 0,
-            last: rows_end_card && ix + 1 == children_len,
-            theme,
             toggle,
             close,
         });
@@ -5847,6 +5813,9 @@ fn render_activity_card(
     // the rounded border. The first and last children carry the card's own
     // radius instead.
     let detail_shown = tool_open && has_detail;
+    // An open command card reads its full command in the detail, so the
+    // header leaves its truncated preview out.
+    let command_in_detail = is_command && detail_shown;
     let header_is_only_child = !detail_shown && !tool.failed;
     let toggle: ActivityToggleFn = Rc::new({
         let scroller = scroller.clone();
@@ -5913,7 +5882,11 @@ fn render_activity_card(
                         .text_color(theme.text_secondary)
                         .child(action),
                 )
-                .when(!detail.is_empty(), |row| {
+                // Open, a command card shows the full command as the first
+                // line of its detail; repeating a truncated copy in the
+                // header only doubled it. The spacer keeps the chevron put.
+                .when(command_in_detail, |row| row.child(div().flex_1().min_w_0()))
+                .when(!detail.is_empty() && !command_in_detail, |row| {
                     if is_command {
                         // Terminal preview: a muted prompt sigil then the
                         // command in the code face, in one settled ink. A
@@ -5922,6 +5895,9 @@ fn render_activity_card(
                         // across a long turn it outshouted the answer.
                         row.child(
                             div()
+                                .debug_selector(move || {
+                                    format!("tool-command-preview-{}-{}", key.0, key.1)
+                                })
                                 .flex_1()
                                 .min_w_0()
                                 .overflow_hidden()
@@ -6089,8 +6065,6 @@ fn render_activity_card(
                     toggle.clone(),
                 )
             }),
-            inspector_inner_radius(&theme),
-            theme,
         ));
     // A failed run carries its first error line right on the card — the
     // fact a user scanning the turn needs, without opening the detail.
@@ -6221,6 +6195,9 @@ fn render_tool_detail(
     // A text read is its file's lines: the path and range already sit in the
     // header, so the arguments JSON would only repeat them.
     let listing = read_listing(tool);
+    // A shell command's output is terminal text: one row per line, scrolled
+    // sideways rather than wrapped, with grep-style locations dimmed.
+    let command_output = tool_command(tool).is_some();
     let first = match tool_command(tool) {
         Some(command) => Some((
             tr!("transcript.command"),
@@ -6311,8 +6288,10 @@ fn render_tool_detail(
             .w_full()
             .min_w_0()
             // A recessed well, not a second faint layer of glass: the code
-            // face holds its contrast over any wallpaper or workbench.
-            .bg(theme.inspector_well(theme.code_bg))
+            // face holds its contrast over any wallpaper or workbench. On the
+            // page glass the column and the card already carry most of that
+            // coverage, so the well tops it up instead of stacking a slab.
+            .bg(transcript_well_fill(theme))
             .flex()
             .flex_col()
             // The surface is always the card's last child, so it carries the
@@ -6337,6 +6316,7 @@ fn render_tool_detail(
                 content,
                 lang,
                 prompt,
+                command_output && section == 1,
                 listing.clone().filter(|_| section == 1),
                 copied_sections.clone(),
                 hovered_sections.clone(),
@@ -6471,6 +6451,7 @@ fn render_detail_section(
     content: String,
     lang: Option<highlight::Lang>,
     prompt: bool,
+    command_output: bool,
     listing: Option<Rc<ReadListing>>,
     copied_sections: CopiedSections,
     hovered_sections: HoveredSections,
@@ -6483,7 +6464,9 @@ fn render_detail_section(
     // and its range), a line-number gutter, and the copy control floated in
     // the corner. Copy carries the lines as read, indentation included.
     let first_line = listing.as_ref().map(|listing| listing.first_line);
-    let bare = listing.is_some();
+    // The command is bare as well: its `$` prompt already says what it is,
+    // so a "Command" label row only spent a line above it.
+    let bare = listing.is_some() || prompt;
     let hover = hovered_sections
         .borrow()
         .get(&hover_key)
@@ -6757,7 +6740,14 @@ fn render_detail_section(
                     )
                 })
                 .child(render_detail_body(
-                    &content, visible, lang, first_line, key, section, theme,
+                    &content,
+                    visible,
+                    lang,
+                    first_line,
+                    command_output,
+                    key,
+                    section,
+                    theme,
                 )),
         );
     if foldable {
@@ -6825,16 +6815,38 @@ fn render_detail_section(
 /// blob wraps inside the card rather than forcing it wide. `visible` is the
 /// prefix slice actually painted (collapse preview / paint cap); token
 /// ranges index lines absolutely, and a prefix slice keeps them aligned.
+#[allow(clippy::too_many_arguments)]
 fn render_detail_body(
     content: &str,
     visible: &[&str],
     lang: Option<highlight::Lang>,
     first_line: Option<usize>,
+    command_output: bool,
     key: (usize, usize),
     section: u8,
     theme: Theme,
 ) -> AnyElement {
-    let tokens = lang.map(|lang| highlight::tokenize_cached(lang, content));
+    let tokens = match lang {
+        Some(lang) => Some(highlight::tokenize_cached(lang, content)),
+        // Plain command output: a `path:line:` location (grep, rg, compiler
+        // diagnostics) takes the comment ink, so the matched text leads.
+        None if command_output => Some(Rc::new(
+            visible
+                .iter()
+                .map(|line| {
+                    location_prefix_len(line)
+                        .map(|len| {
+                            vec![Token {
+                                range: 0..len,
+                                class: TokenClass::Comment,
+                            }]
+                        })
+                        .unwrap_or_default()
+                })
+                .collect::<Vec<_>>(),
+        )),
+        None => None,
+    };
     // A file listing numbers its lines from where the read started. The
     // gutter is as wide as the largest number painted, in the code face so
     // every digit is one width and the numbers right-align.
@@ -6842,14 +6854,11 @@ fn render_detail_body(
         let last = first + visible.len().saturating_sub(1);
         theme.term_px(8. * last.to_string().len() as f32)
     });
-    div()
-        .flex_1()
-        .min_w_0()
+    let column = div()
         .font_family(theme::code_font_family())
         .text_size(theme.term_px(13.))
         .line_height(theme.term_px(20.))
         .text_color(theme.code_text)
-        .whitespace_normal()
         .flex()
         .flex_col()
         .children(visible.iter().enumerate().map(move |(line_ix, line)| {
@@ -6889,8 +6898,32 @@ fn render_detail_body(
                     .child(div().flex_1().min_w_0().child(code)),
                 _ => div().w_full().min_w_0().child(code),
             }
-        }))
-        .into_any_element()
+        }));
+    if command_output {
+        // One row per output line, as a terminal prints it: a long line
+        // scrolls sideways instead of wrapping into a ragged block where its
+        // continuation lost the line's indentation.
+        let mut scroll = div()
+            .id(ElementId::NamedInteger(
+                "detail-output-scroll".into(),
+                ((key.0 as u64) << 34) | ((key.1 as u64) << 18) | ((section as u64) << 12),
+            ))
+            .flex_1()
+            .min_w_0()
+            .overflow_x_scroll()
+            .child(column.flex_none().whitespace_nowrap());
+        // Only a sideways gesture scrolls the output; a plain wheel keeps
+        // scrolling the transcript instead of being turned into a sideways
+        // move (gpui maps a vertical wheel onto the only scrolling axis).
+        scroll.style().restrict_scroll_to_axis = Some(true);
+        scroll.into_any_element()
+    } else {
+        column
+            .flex_1()
+            .min_w_0()
+            .whitespace_normal()
+            .into_any_element()
+    }
 }
 
 // ── inline edit diff ───────────────────────────────────────────────────────
@@ -8227,6 +8260,32 @@ fn tool_command(tool: &ToolCall) -> Option<String> {
 /// filled the truncated header and every row looked the same. A `cd`
 /// anywhere else is kept — where a command ran is a fact. Never strips the
 /// command to nothing, and stops at the first clause it cannot read safely.
+/// The byte length of a leading `path:line:` (or `path:line:col:`) location,
+/// as grep, rg and compilers print it, so the location can be dimmed and the
+/// matched text lead. The path must look like one (it has a `/` or a `.`),
+/// so a prose line such as `error:12: …` is left alone.
+fn location_prefix_len(line: &str) -> Option<usize> {
+    let path_end = line.find(':')?;
+    let path = &line[..path_end];
+    if path.is_empty()
+        || path.contains(char::is_whitespace)
+        || !(path.contains('/') || path.contains('.'))
+    {
+        return None;
+    }
+    let mut end = path_end + 1;
+    let mut numbers = 0;
+    while numbers < 2 {
+        let digits = line[end..].bytes().take_while(u8::is_ascii_digit).count();
+        if digits == 0 || line.as_bytes().get(end + digits) != Some(&b':') {
+            break;
+        }
+        end += digits + 1;
+        numbers += 1;
+    }
+    (numbers > 0).then_some(end)
+}
+
 fn command_preview(command: &str, workspace: Option<&Path>) -> String {
     let workspace = workspace
         .map(|root| root.to_string_lossy().trim_end_matches('/').to_string())
@@ -8809,6 +8868,8 @@ impl StreamFade {
 ///
 /// Line height must clear inline-code backgrounds: a tight 14/22 measure let
 /// the next wrapped line (and the next block) paint through the previous one.
+/// Inline code now paints as a chip fitted to the text ([`inline_code_chip`]),
+/// so the wash no longer fills the whole line either way.
 fn paragraph_text(
     text: &str,
     size: f32,
@@ -8819,6 +8880,20 @@ fn paragraph_text(
     theme: Theme,
 ) -> impl IntoElement {
     paragraph_text_live(text, size, line_height, weight, color, key, theme, false)
+}
+
+/// The shape inline code paints as (#168): the keycap's geometry — 4px
+/// corners (`Radius::Small`) and a little side padding — over the existing
+/// `inline_code_bg` wash, fitted to the text's height instead of filling the
+/// line. Only runs with exactly that wash take it, so a text selection or a
+/// colour swatch drawn as a run background keeps its plain rectangle.
+pub(crate) fn inline_code_chip(theme: &Theme) -> gpui::TextBackgroundChip {
+    gpui::TextBackgroundChip {
+        color: theme.inline_code_bg,
+        corner_radius: Radius::Small.px(theme),
+        padding_x: DynamicSpacing::Base03.px(theme),
+        padding_y: DynamicSpacing::Base01.px(theme),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -8874,7 +8949,9 @@ fn paragraph_text_live(
             .child(
                 SelectableText::new(
                     key,
-                    StyledText::new(body).with_runs(runs),
+                    StyledText::new(body)
+                        .with_runs(runs)
+                        .with_background_chips(inline_code_chip(&theme)),
                     plain,
                     links,
                     Some(scope),
@@ -8886,7 +8963,13 @@ fn paragraph_text_live(
         let ranges: Vec<Range<usize>> = links.iter().map(|(range, _)| range.clone()).collect();
         wrapper
             .child(
-                InteractiveText::new(key, StyledText::new(body).with_runs(runs)).on_click(
+                InteractiveText::new(
+                    key,
+                    StyledText::new(body)
+                        .with_runs(runs)
+                        .with_background_chips(inline_code_chip(&theme)),
+                )
+                .on_click(
                     ranges,
                     move |range_ix: usize, _, cx| {
                         if let Some((_, url)) = links.get(range_ix) {
@@ -9675,9 +9758,155 @@ fn render_block(
     }
 }
 
-/// Markdown-linked images never fetch remote content. The quiet fallback
-/// keeps the alt text visible, and only an explicit Open action hands a safe
-/// HTTP(S) URL to the browser.
+/// The tallest an inline Markdown image paints at the default UI size before it
+/// scales down, so one tall screenshot cannot push a whole message off screen.
+const MARKDOWN_IMAGE_MAX_H_REMS: f32 = 30.;
+/// The loading bar's height while a remote image's size is not known yet.
+const MARKDOWN_IMAGE_LOADING_H_REMS: f32 = 6.;
+
+thread_local! {
+    /// Natural sizes of remote Markdown images, recorded by the image source
+    /// once GPUI's loader has decoded them. Layout needs the size up front:
+    /// a GPUI `img` left at an auto size paints at its pixel size, and a
+    /// `max_w` then squeezes the box without keeping its aspect ratio.
+    static MARKDOWN_IMAGE_SIZES: RefCell<HashMap<SharedString, gpui::Size<Pixels>>> =
+        RefCell::new(HashMap::new());
+    /// The decoded bitmaps behind those sizes. GPUI's asset cache keeps every
+    /// image it has ever decoded for the life of the process, and a long
+    /// visual-debug transcript of full-size screenshots is gigabytes; holding
+    /// the bitmap here is what lets an old one be released.
+    static MARKDOWN_IMAGE_BITMAPS: RefCell<MarkdownImageBitmaps> =
+        RefCell::new(MarkdownImageBitmaps::default());
+}
+
+/// How much decoded Markdown imagery stays resident — roughly eight 2560px
+/// screenshots — before the ones that scrolled away are let go.
+const MARKDOWN_IMAGE_BITMAP_BUDGET: usize = 128 * 1024 * 1024;
+/// How recently an image must have been painted to be safe from release.
+/// Every image in the frame that is drawing is painted *now*; one that has not
+/// been painted for this long is off screen.
+const MARKDOWN_IMAGE_RELEASE_AGE: Duration = Duration::from_secs(2);
+
+/// The decoded Markdown images in use, least recently painted first, so the
+/// ones no longer on screen can be dropped once the budget is passed.
+struct MarkdownImageBitmaps {
+    entries: HashMap<SharedString, RetainedBitmap>,
+    byte_budget: usize,
+    bytes: usize,
+}
+
+impl Default for MarkdownImageBitmaps {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            byte_budget: MARKDOWN_IMAGE_BITMAP_BUDGET,
+            bytes: 0,
+        }
+    }
+}
+
+struct RetainedBitmap {
+    image: Arc<gpui::RenderImage>,
+    bytes: usize,
+    used: Instant,
+}
+
+impl MarkdownImageBitmaps {
+    /// Record the bitmap behind `url`, returning the ones that fell out of the
+    /// budget with the URL each was fetched for.
+    fn retain(
+        &mut self,
+        url: SharedString,
+        image: Arc<gpui::RenderImage>,
+    ) -> Vec<(SharedString, Arc<gpui::RenderImage>)> {
+        let now = Instant::now();
+        // Frame 0 stands for the image: an animated one is small either way.
+        let bytes = image.as_bytes(0).map_or(0, <[u8]>::len);
+        let entry = RetainedBitmap {
+            image,
+            bytes,
+            used: now,
+        };
+        match self.entries.insert(url, entry) {
+            Some(previous) => self.bytes = self.bytes - previous.bytes + bytes,
+            None => self.bytes += bytes,
+        }
+        let mut released = Vec::new();
+        while self.bytes > self.byte_budget {
+            let oldest = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.used)
+                .map(|(url, entry)| (url.clone(), entry.used));
+            let Some((url, used)) = oldest else { break };
+            // A transcript whose *visible* images alone exceed the budget
+            // stops here rather than reloading them frame after frame.
+            if now.saturating_duration_since(used) < MARKDOWN_IMAGE_RELEASE_AGE {
+                break;
+            }
+            if let Some(entry) = self.entries.remove(&url) {
+                self.bytes -= entry.bytes;
+                released.push((url, entry.image));
+            }
+        }
+        released
+    }
+}
+
+/// The natural size of a remote Markdown image, once it has loaded.
+fn markdown_image_size(url: &str) -> Option<gpui::Size<Pixels>> {
+    MARKDOWN_IMAGE_SIZES.with(|sizes| sizes.borrow().get(url).copied())
+}
+
+/// A remote image loaded through GPUI's own image cache (and the app's bounded
+/// HTTPS client), recording the decoded size the first time it is known and
+/// asking for one more frame so the layout can take it. Every load also hands
+/// the bitmap to the bounded retention set, which releases the ones that
+/// scrolled away.
+fn markdown_image_source(url: SharedString) -> ImageSource {
+    ImageSource::Custom(Arc::new(move |window, cx| {
+        let resource = gpui::Resource::Uri(gpui::SharedUri::from(url.to_string()));
+        let result = window.use_asset::<gpui::ImgResourceLoader>(&resource, cx)?;
+        if let Ok(image) = &result {
+            let size = image.size(0);
+            let size = gpui::size(px(size.width.0 as f32), px(size.height.0 as f32));
+            let fresh = MARKDOWN_IMAGE_SIZES
+                .with(|sizes| sizes.borrow_mut().insert(url.clone(), size).is_none());
+            let released = MARKDOWN_IMAGE_BITMAPS
+                .with(|bitmaps| bitmaps.borrow_mut().retain(url.clone(), image.clone()));
+            for (released_url, released_image) in released {
+                let resource = gpui::Resource::Uri(gpui::SharedUri::from(released_url.to_string()));
+                cx.remove_asset::<gpui::ImgResourceLoader>(&resource);
+                let _ = window.drop_image(released_image);
+            }
+            if fresh {
+                // `refresh` is a no-op while the frame is drawing, which is when
+                // the loader runs: ask for the next frame by name.
+                window.request_animation_frame();
+            }
+        }
+        Some(result)
+    }))
+}
+
+/// The box an image of `natural` size takes: its own width, narrowed to the
+/// column and to the width at which it reaches `max_h`; the height follows the
+/// aspect ratio. Pure, so the arithmetic is tested without a window.
+fn markdown_image_max_w(natural: gpui::Size<Pixels>, max_h: Pixels) -> Option<(Pixels, f32)> {
+    let (w, h) = (f32::from(natural.width), f32::from(natural.height));
+    if w <= 0. || h <= 0. {
+        return None;
+    }
+    let ratio = w / h;
+    Some((px(w.min(f32::from(max_h) * ratio)), ratio))
+}
+
+/// A Markdown image, inline. HTTPS images load through the app's bounded
+/// client and paint at their own size, narrowed to the column and to a maximum
+/// height; a click opens the image in the browser. While it loads a quiet bar
+/// holds its place; if it cannot load (a private attachment, a dead link, a
+/// non-HTTPS URL) the alt text and an explicit Open action take its place.
+/// Local-file and data URLs never load and never open.
 fn render_markdown_image(
     alt: &str,
     url: &str,
@@ -9688,26 +9917,85 @@ fn render_markdown_image(
     theme: Theme,
 ) -> impl IntoElement {
     let open_selector = format!("markdown-image-open-{ix}-{id_namespace}-{block_ix}-{sub}");
-    let open = markdown_image_open_url(url).map(|url| {
-        div()
-            .flex_none()
-            .debug_selector(move || open_selector)
-            .child(
-                crate::ui::button::LinkButton::new(
-                    md_id(ix, id_namespace, block_ix, sub),
-                    tr!("explorer.open"),
-                )
-                .external()
-                .size(TextSize::Small)
-                .on_click(&theme, move |_, _, cx| cx.open_url(&url)),
-            )
-            .into_any_element()
-    });
-    div()
+    let open_url = markdown_image_open_url(url);
+    let open_action = {
+        let open_url = open_url.clone();
+        move || {
+            open_url.clone().map(|url| {
+                let selector = open_selector.clone();
+                div()
+                    .flex_none()
+                    .debug_selector(move || selector.clone())
+                    .child(
+                        crate::ui::button::LinkButton::new(
+                            md_id(ix, id_namespace, block_ix, sub),
+                            tr!("explorer.open"),
+                        )
+                        .external()
+                        .size(TextSize::Small)
+                        .on_click(&theme, move |_, _, cx| {
+                            // Nested in the image's own frame: one open, not two.
+                            cx.stop_propagation();
+                            cx.open_url(&url);
+                        }),
+                    )
+                    .into_any_element()
+            })
+        }
+    };
+    let column = div()
         .w_full()
         .min_w_0()
         .flex()
-        .child(markdown_image_fallback(alt, open, theme))
+        .flex_col()
+        // Not stretched: an image narrower than the column keeps its width.
+        .items_start();
+    let Some(url) = open_url else {
+        return column.child(markdown_image_fallback(alt, open_action(), theme));
+    };
+
+    let alt = alt.to_string();
+    let image_selector = format!("markdown-image-{ix}-{id_namespace}-{block_ix}-{sub}");
+    let loading_h = theme.rems(MARKDOWN_IMAGE_LOADING_H_REMS);
+    let image = img(markdown_image_source(SharedString::from(url.clone())))
+        .size_full()
+        .object_fit(ObjectFit::Contain)
+        .rounded(panel::RADIUS.px(&theme))
+        .with_loading(move || {
+            crate::ui::feedback::skeleton_bar(px(0.), loading_h, &theme)
+                .w_full()
+                .into_any_element()
+        })
+        .with_fallback({
+            let alt = alt.clone();
+            move || markdown_image_fallback(&alt, open_action(), theme)
+        });
+    let open_url = url.clone();
+    let frame = div()
+        .id(SharedString::from(image_selector.clone()))
+        .debug_selector(move || image_selector.clone())
+        .w_full()
+        .cursor_pointer()
+        .tip(if alt.trim().is_empty() {
+            tr!("explorer.open")
+        } else {
+            alt.clone()
+        })
+        .on_click(move |_, _, cx| cx.open_url(&open_url));
+    let frame = match markdown_image_size(&url)
+        .and_then(|natural| markdown_image_max_w(natural, theme.rems(MARKDOWN_IMAGE_MAX_H_REMS)))
+    {
+        Some((max_w, ratio)) => {
+            let mut frame = frame.max_w(max_w);
+            // The height follows the width through the image's own ratio.
+            frame.style().aspect_ratio = Some(ratio);
+            frame
+        }
+        // Not loaded yet (or it failed): no box of our own, so the loading
+        // bar and the fallback card size themselves.
+        None => frame,
+    };
+    column.child(frame.child(image))
 }
 
 /// Normalize the URL handed to the OS opener, rejecting malformed targets and
@@ -10053,44 +10341,53 @@ fn render_code_block(
         } else {
             tr!("transcript_view.show_remaining_lines", count = hidden)
         };
+        // The hover crosses from `text_secondary` to `text_primary` over the
+        // wash, which is exactly `Hover::row` — the fade the row layer uses.
+        // The click goes on the element itself: a fade wraps the element, so
+        // it is the last *styling* call and the children attach to the wrapper.
+        let fold = div()
+            .id(ElementId::NamedInteger(
+                "code-fold".into(),
+                (ix as u64) << 32 | block_key as u64,
+            ))
+            .w_full()
+            .h(px(30.))
+            .px(DynamicSpacing::Base12.px(&theme))
+            .border_t_1()
+            .border_color(theme.hairline())
+            .flex()
+            .items_center()
+            .gap(DynamicSpacing::Base06.px(&theme))
+            .cursor_pointer()
+            .text_size(TextSize::Small.px(&theme))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(theme.text_secondary)
+            .on_click(move |_, _, cx| {
+                let key = (ix, id_namespace, block_ix);
+                let mut open = expanded_blocks.borrow_mut();
+                if !open.remove(&key) {
+                    open.insert(key);
+                }
+                drop(open);
+                scroller.remeasure_toggle(ix);
+                cx.refresh_windows();
+            });
         card = card.child(
-            div()
-                .id(ElementId::NamedInteger(
-                    "code-fold".into(),
-                    (ix as u64) << 32 | block_key as u64,
-                ))
-                .w_full()
-                .h(px(30.))
-                .px(DynamicSpacing::Base12.px(&theme))
-                .border_t_1()
-                .border_color(theme.hairline())
-                .flex()
-                .items_center()
-                .gap(DynamicSpacing::Base06.px(&theme))
-                .cursor_pointer()
-                .text_size(TextSize::Small.px(&theme))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(theme.text_secondary)
-                .hover_state(&theme)
-                .child(label)
-                .child(div().flex_1())
-                .child(disclosure_chevron(
-                    format!("code-caret-{ix}-{block_ix}"),
-                    expanded,
-                    IconSize::XSmall.px(&theme),
-                    theme.text_muted,
-                    &theme,
-                ))
-                .on_click(move |_, _, cx| {
-                    let key = (ix, id_namespace, block_ix);
-                    let mut open = expanded_blocks.borrow_mut();
-                    if !open.remove(&key) {
-                        open.insert(key);
-                    }
-                    drop(open);
-                    scroller.remeasure_toggle(ix);
-                    cx.refresh_windows();
-                }),
+            crate::motion::fade(
+                fold,
+                format!("code-fold-{ix}-{block_ix}"),
+                &theme,
+                Hover::row(&theme),
+            )
+            .child(label)
+            .child(div().flex_1())
+            .child(disclosure_chevron(
+                format!("code-caret-{ix}-{block_ix}"),
+                expanded,
+                IconSize::XSmall.px(&theme),
+                theme.text_muted,
+                &theme,
+            )),
         );
     }
 
@@ -10284,7 +10581,7 @@ fn render_mermaid_block(
     } else {
         tr!("transcript_view.show_source")
     };
-    let toggle = div()
+    let toggle_body = div()
         .id(ElementId::NamedInteger(
             "diagram-source".into(),
             (ix as u64) << 32 | block_key as u64,
@@ -10302,16 +10599,6 @@ fn render_mermaid_block(
         .text_size(TextSize::Small.px(&theme))
         .font_weight(FontWeight::MEDIUM)
         .text_color(theme.text_secondary)
-        .hover_state(&theme)
-        .child(toggle_label)
-        .child(div().flex_1())
-        .child(disclosure_chevron(
-            format!("mermaid-caret-{ix}-{block_ix}"),
-            showing_source,
-            IconSize::XSmall.px(&theme),
-            theme.text_muted,
-            &theme,
-        ))
         .on_click(move |_, _, cx| {
             let key = (ix, id_namespace, block_ix);
             let mut open = expanded_blocks.borrow_mut();
@@ -10322,6 +10609,21 @@ fn render_mermaid_block(
             scroller.remeasure_toggle(ix);
             cx.refresh_windows();
         });
+    let toggle = crate::motion::fade(
+        toggle_body,
+        format!("diagram-source-{ix}-{block_ix}"),
+        &theme,
+        Hover::row(&theme),
+    )
+    .child(toggle_label)
+    .child(div().flex_1())
+    .child(disclosure_chevron(
+        format!("mermaid-caret-{ix}-{block_ix}"),
+        showing_source,
+        IconSize::XSmall.px(&theme),
+        theme.text_muted,
+        &theme,
+    ));
 
     code_block_surface(div().w_full().min_w_0(), theme)
         .overflow_hidden()
@@ -10338,7 +10640,9 @@ fn render_mermaid_block(
 /// does not (light palettes, Reduce Transparency, Increase Contrast, no
 /// backdrop pass) it stays the opaque `code_bg` card with its hairline.
 fn code_block_surface(el: gpui::Div, theme: Theme) -> gpui::Div {
-    if theme.floating_glass_sigma().is_some() {
+    if let Some(fill) = theme.on_page_glass_code_card(theme.code_bg) {
+        el.inspector_card(&theme, fill)
+    } else if theme.floating_glass_sigma().is_some() {
         el.inspector_card(&theme, theme.inspector_well(theme.code_bg))
     } else {
         el.rounded(panel::RADIUS.px(&theme))
@@ -10663,10 +10967,21 @@ fn workspace_relative_path(path: &str, workspace: Option<&Path>) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-/// End-of-task changed-files summary: a borderless tonal well
-/// (`surface_secondary`, frosted on glass) — no hairline, no icon tile — with
-/// one header line ("Changed N files +a −d" and a Review chip) and roomy file
-/// rows. Shows 3 rows; expanded shows up to 12 with a clip note.
+/// The changed-files summary's surface: the transcript's inspector card, on
+/// the same [`frosted_transcript_fill`] as the tool, thought and delegation
+/// cards beside it. It used to be a `surface_secondary` well at the
+/// wallpaper's card opacity, which in dark palettes landed a shade *below* the
+/// canvas (1.02:1) and vanished; the inspector fill has a contrast floor over
+/// glass and the `overlay` plate where it is opaque, so it reads as a card
+/// everywhere the others do.
+fn changed_files_surface(el: gpui::Div, theme: Theme) -> gpui::Div {
+    el.inspector_card(&theme, frosted_transcript_fill(theme))
+}
+
+/// End-of-task changed-files summary: an inspector card
+/// ([`changed_files_surface`]) — no hairline, no icon tile — with one header
+/// line ("Changed N files +a −d" and a Review chip) and roomy file rows. Shows
+/// 3 rows; expanded shows up to 12 with a clip note.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_changed_files(
     files: &[ChangedFile],
@@ -10808,19 +11123,16 @@ pub(crate) fn render_changed_files(
         header = header.child(review);
     }
 
-    // A tonal well, not a framed card: the edge is transparent (the frost
-    // still applies on glass) and `surface_secondary` alone sets it apart
-    // from the transcript canvas.
-    let mut card = div()
-        .debug_selector(move || format!("changed-files-{message_ix}"))
-        .w_full()
-        .min_w_0()
-        .card_surface(
-            &theme,
-            gpui::transparent_black(),
-            theme.card_fill(theme.surface_secondary),
-        )
-        .overflow_hidden()
+    // The transcript's card material, so the summary reads as a card beside
+    // the tool cards rather than a well sunk into the canvas.
+    let mut card = changed_files_surface(
+        div()
+            .debug_selector(move || format!("changed-files-{message_ix}"))
+            .w_full()
+            .min_w_0(),
+        theme,
+    )
+    .overflow_hidden()
         .child(header)
         .child(rows);
 
@@ -10834,7 +11146,7 @@ pub(crate) fn render_changed_files(
             tr!("transcript_view.show_more_files", count = remaining)
         };
         let clipped = expanded && files.len() > EXPANDED_PREVIEW_LIMIT;
-        let mut toggle = div()
+        let toggle_body = div()
             .id(ElementId::NamedInteger(
                 "changed-files-toggle".into(),
                 message_ix as u64,
@@ -10848,8 +11160,18 @@ pub(crate) fn render_changed_files(
             .text_size(TextSize::Small.px(&theme))
             .font_weight(FontWeight::MEDIUM)
             .text_color(theme.text_secondary)
-            .hover_state(&theme)
-            .child(label);
+            .on_click(move |_, _, cx| {
+                toggle_index(&expanded_files, message_ix);
+                scroller.remeasure_toggle(message_ix);
+                cx.refresh_windows();
+            });
+        let mut toggle = crate::motion::fade(
+            toggle_body,
+            format!("changed-files-toggle-{message_ix}"),
+            &theme,
+            Hover::row(&theme),
+        )
+        .child(label);
         if clipped {
             toggle = toggle.child(
                 div()
@@ -10866,22 +11188,13 @@ pub(crate) fn render_changed_files(
                     )),
             );
         }
-        card = card.child(
-            toggle
-                .child(div().flex_1())
-                .child(disclosure_chevron(
-                    format!("files-caret-{message_ix}"),
-                    expanded,
-                    IconSize::XSmall.px(&theme),
-                    theme.text_muted,
-                    &theme,
-                ))
-                .on_click(move |_, _, cx| {
-                    toggle_index(&expanded_files, message_ix);
-                    scroller.remeasure_toggle(message_ix);
-                    cx.refresh_windows();
-                }),
-        );
+        card = card.child(toggle.child(div().flex_1()).child(disclosure_chevron(
+            format!("files-caret-{message_ix}"),
+            expanded,
+            IconSize::XSmall.px(&theme),
+            theme.text_muted,
+            &theme,
+        )));
     }
 
     card
@@ -11810,6 +12123,53 @@ mod tests {
             generation_tps(&no_output, Some(Duration::from_secs(3))),
             None
         );
+    }
+
+    /// The changed-files summary sits on the same material as the transcript's
+    /// other cards in every wallpaper treatment, and with no wallpaper it is a
+    /// visible step off the canvas: the `surface_secondary` well it replaced
+    /// was 1.02:1, darker than the canvas, in dark palettes.
+    #[test]
+    fn changed_files_card_is_the_transcript_card_material() {
+        for base in [Theme::dark(), Theme::light()] {
+            for (active, glass) in [(false, false), (false, true), (true, false), (true, true)] {
+                let theme = base.with_wallpaper(theme::SurfaceTreatment {
+                    active,
+                    glass,
+                    card_alpha: 0.8,
+                    ..theme::SurfaceTreatment::OPAQUE
+                });
+                let mut card = changed_files_surface(div(), theme);
+                assert_eq!(
+                    card.style().background,
+                    Some(frosted_transcript_fill(theme).into()),
+                    "{:?} active {active} glass {glass}",
+                    theme.mode
+                );
+            }
+        }
+        // Opaque, no wallpaper: the card's plate lifts it off the canvas
+        // instead of sinking below it.
+        for id in theme::ThemeId::ALL {
+            let theme = Theme::for_id(id).with_wallpaper(theme::SurfaceTreatment::OPAQUE);
+            if theme.floating_glass_sigma().is_some() {
+                continue;
+            }
+            let plate = frosted_transcript_fill(theme);
+            let (canvas, ink) = (theme.background.to_rgb(), plate.to_rgb());
+            let a = plate.a;
+            let card = [
+                ink.r * a + canvas.r * (1. - a),
+                ink.g * a + canvas.g * (1. - a),
+                ink.b * a + canvas.b * (1. - a),
+            ];
+            let ratio =
+                crate::wallpaper::contrast_ratio(card, [canvas.r, canvas.g, canvas.b]);
+            assert!(
+                ratio >= 1.045,
+                "{id:?}: the card must be a visible step off the canvas, got {ratio:.3}"
+            );
+        }
     }
 
     #[test]
@@ -12795,6 +13155,48 @@ mod tests {
         assert!(block_gap(&para(), &heading()) > block_gap(&para(), &para()));
         assert!(block_gap(&heading(), &para()) < block_gap(&para(), &heading()));
         assert!(block_gap(&para(), &list()) < block_gap(&list(), &para()));
+    }
+
+    /// #168: inline code paints as the keycap's shape over its own wash —
+    /// 4px corners, 3px each side, 1px over the text — and only runs with
+    /// exactly that wash take it.
+    #[test]
+    fn inline_code_chip_uses_the_keycap_shape_over_the_code_wash() {
+        for theme in [Theme::dark(), Theme::light()] {
+            let chip = inline_code_chip(&theme);
+            assert_eq!(chip.color, theme.inline_code_bg);
+            assert_eq!(chip.corner_radius, Radius::Small.px(&theme));
+            assert_eq!(chip.padding_x, DynamicSpacing::Base03.px(&theme));
+            assert_eq!(chip.padding_y, DynamicSpacing::Base01.px(&theme));
+            assert_ne!(chip.color, theme.selection, "a selection stays a rectangle");
+        }
+    }
+
+    /// The chip geometry the vendored gpui paints (`TextBackgroundChip`).
+    #[test]
+    fn a_background_chip_hugs_the_text_and_pads_its_sides() {
+        let chip = gpui::TextBackgroundChip {
+            color: Theme::dark().inline_code_bg,
+            corner_radius: px(4.),
+            padding_x: px(3.),
+            padding_y: px(1.),
+        };
+        let run = gpui::Bounds {
+            origin: gpui::point(px(100.), px(50.)),
+            size: gpui::size(px(40.), px(26.)),
+        };
+        // 26px line, 14px of text (ascent 11 + descent 3): the text box sits
+        // 6px down; the chip is that box plus 1px above and below, plus 3px
+        // each side.
+        let bounds = chip.bounds(run, px(26.), px(11.), px(3.));
+        assert_eq!(bounds.origin, gpui::point(px(97.), px(55.)));
+        assert_eq!(bounds.size, gpui::size(px(46.), px(16.)));
+        // A line no taller than the text clips the padding to the line.
+        let tight = chip.bounds(run, px(14.), px(11.), px(3.));
+        assert_eq!((tight.origin.y, tight.size.height), (px(50.), px(14.)));
+        // The radius never exceeds a capsule.
+        assert_eq!(chip.radius(px(16.)), px(4.));
+        assert_eq!(chip.radius(px(6.)), px(3.));
     }
 
     #[test]
@@ -14231,7 +14633,7 @@ mod tests {
         assert_eq!(open_children.borrow().get(&(0, 0)), Some(&1));
         assert!(
             cx.debug_bounds("subagent-row-focus-ring").is_none(),
-            "a click does not take focus"
+            "no focus ring"
         );
         cx.simulate_click(second, gpui::Modifiers::none());
         draw(cx);
@@ -14240,11 +14642,11 @@ mod tests {
         // Tab reaches the first row and paints its ring over the row.
         cx.update(|window, _| window.focus_next());
         draw(cx);
-        let ring = cx
-            .debug_bounds("subagent-row-focus-ring")
-            .expect("a focused row wears the ring");
-        let first = cx.debug_bounds("subagent-row-0-0-0").expect("first row");
-        assert_eq!(ring, first, "the ring sits exactly on the row, no layout");
+        // Tab still reaches the row; Orbit just paints no ring on it.
+        assert!(
+            cx.debug_bounds("subagent-row-focus-ring").is_none(),
+            "a focused row draws no ring"
+        );
 
         cx.simulate_keystrokes("enter");
         draw(cx);
@@ -14298,7 +14700,7 @@ mod tests {
         assert!(open.borrow().contains(&(0, 0)), "a click opens the row");
         assert!(
             cx.debug_bounds("tool-toggle-focus-0-0-ring").is_none(),
-            "a click does not take focus"
+            "no focus ring"
         );
         cx.simulate_click(header, gpui::Modifiers::none());
         draw(cx);
@@ -14306,11 +14708,11 @@ mod tests {
 
         cx.update(|window, _| window.focus_next());
         draw(cx);
-        let ring = cx
-            .debug_bounds("tool-toggle-focus-0-0-ring")
-            .expect("a focused row wears the ring");
-        let header = cx.debug_bounds("tool-header-0-0").expect("header");
-        assert_eq!(ring, header, "the ring sits exactly on the header, no layout");
+        // Tab still reaches the row; Orbit just paints no ring on it.
+        assert!(
+            cx.debug_bounds("tool-toggle-focus-0-0-ring").is_none(),
+            "a focused row draws no ring"
+        );
 
         cx.simulate_keystrokes("enter");
         draw(cx);
@@ -14774,6 +15176,122 @@ mod tests {
         assert!(cx.debug_bounds("tool-section-label-0-0-0").is_none(), "no Arguments");
         assert!(cx.debug_bounds("tool-section-label-0-0-1").is_none(), "no Output label");
         assert!(cx.debug_bounds("tool-section-copy-0-0-1").is_some(), "one copy control");
+    }
+
+    fn bash_tool(command: &str, output: &str) -> ToolCall {
+        ToolCall {
+            name: "bash".into(),
+            summary: String::new(),
+            path: None,
+            added: 0,
+            removed: 0,
+            id: None,
+            args: Some(serde_json::json!({ "command": command })),
+            output: Some(serde_json::json!({ "content": [{ "type": "text", "text": output }] })),
+            failed: false,
+            facts: Default::default(),
+            details: None,
+        }
+    }
+
+    /// An open command card says its command once: the header drops its
+    /// truncated preview, the command block has no "Command" label (its `$`
+    /// names it) and keeps one copy control, and the output keeps its label
+    /// and line count. Its long lines scroll sideways instead of wrapping.
+    #[gpui::test]
+    fn an_open_command_card_shows_the_command_once(cx: &mut gpui::TestAppContext) {
+        let long = format!("src/app/remote_ui_tests.rs:181:{}", "x".repeat(400));
+        let tool = bash_tool("rg -n workflow_mode src/app", &format!("{long}\nshort.rs:3:ok"));
+        struct Column(ToolCall);
+        impl gpui::Render for Column {
+            fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+                div().w(px(500.)).min_w_0().flex().flex_col().child(render_activity_card(
+                    &self.0,
+                    false,
+                    theme::Theme::for_id(theme::ThemeId::Orbit),
+                    None,
+                    (0, 0),
+                    true,
+                    Rc::new(RefCell::new(HashSet::new())),
+                    Rc::new(RefCell::new(HashMap::new())),
+                    Rc::new(RefCell::new(HashMap::new())),
+                    Rc::new(RefCell::new(HashMap::new())),
+                    Rc::new(RefCell::new(HashSet::new())),
+                    MessageScrollerState::new(1),
+                    None,
+                    None,
+                    None,
+                ))
+            }
+        }
+        let (view, cx) = cx.add_window_view(|_, _| Column(tool));
+        cx.draw(
+            point(px(0.), px(0.)),
+            gpui::size(px(600.), px(600.)),
+            |_, _| view.clone(),
+        );
+        assert!(
+            cx.debug_bounds("tool-command-preview-0-0").is_none(),
+            "the open header does not repeat the command"
+        );
+        assert!(cx.debug_bounds("tool-section-label-0-0-0").is_none(), "no Command label");
+        assert!(cx.debug_bounds("tool-section-copy-0-0-0").is_some(), "the command copies");
+        assert!(cx.debug_bounds("tool-section-label-0-0-1").is_some(), "Output keeps its label");
+        // Two output lines are two rows: the 400-character one did not wrap.
+        // Inside a 500px column (the transcript's role), the 400-character
+        // line scrolls inside its block: neither copy control is pushed out.
+        for copy in ["tool-section-copy-0-0-0", "tool-section-copy-0-0-1"] {
+            let bounds = cx.debug_bounds(copy).expect("copy control");
+            assert!(bounds.right() <= px(500.), "{copy} at {bounds:?} left the column");
+        }
+    }
+
+    /// Folded, the header still previews the command.
+    #[gpui::test]
+    fn a_folded_command_card_previews_its_command(cx: &mut gpui::TestAppContext) {
+        struct Folded(ToolCall);
+        impl gpui::Render for Folded {
+            fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+                render_activity_card(
+                    &self.0,
+                    false,
+                    theme::Theme::for_id(theme::ThemeId::Orbit),
+                    None,
+                    (0, 0),
+                    false,
+                    Rc::new(RefCell::new(HashSet::new())),
+                    Rc::new(RefCell::new(HashMap::new())),
+                    Rc::new(RefCell::new(HashMap::new())),
+                    Rc::new(RefCell::new(HashMap::new())),
+                    Rc::new(RefCell::new(HashSet::new())),
+                    MessageScrollerState::new(1),
+                    None,
+                    None,
+                    None,
+                )
+            }
+        }
+        let (view, cx) =
+            cx.add_window_view(|_, _| Folded(bash_tool("cargo test", "ok")));
+        cx.draw(
+            point(px(0.), px(0.)),
+            gpui::size(px(600.), px(600.)),
+            |_, _| view.clone(),
+        );
+        assert!(cx.debug_bounds("tool-command-preview-0-0").is_some());
+    }
+
+    #[test]
+    fn grep_locations_are_found_and_prose_is_left_alone() {
+        assert_eq!(location_prefix_len("src/a.rs:12:fn main() {"), Some(12));
+        assert_eq!(location_prefix_len("src/a.rs:12:4: error"), Some(14));
+        assert_eq!(location_prefix_len("crates/x/y_tests.rs:181:    app"), Some(24));
+        // Not locations: prose, a word with no path shape, no line number.
+        assert_eq!(location_prefix_len("error:12: boom"), None);
+        assert_eq!(location_prefix_len("note: see above"), None);
+        assert_eq!(location_prefix_len("src/a.rs: no number"), None);
+        assert_eq!(location_prefix_len("two words.rs:3: x"), None);
+        assert_eq!(location_prefix_len(""), None);
     }
 
     #[gpui::test]
@@ -16396,131 +16914,235 @@ mod tests {
         );
     }
 
-    /// Markdown images are passive content: painting one never asks GPUI's
-    /// image loader for the URL. HTTP(S) gets a separate Open action; a local
-    /// file URL stays noninteractive.
-    #[gpui::test]
-    fn markdown_images_never_fetch_and_only_safe_urls_open(cx: &mut gpui::TestAppContext) {
-        let cx = cx.add_empty_window();
-        let requested = Arc::new(std::sync::Mutex::new(Vec::new()));
-        cx.update(|_, cx| {
-            cx.set_global(theme::Theme::for_id(theme::ThemeId::Orbit));
-            cx.set_http_client(Arc::new(PngHttpClient {
-                requested: requested.clone(),
-            }));
-        });
+    /// An HTTP client that answers every request with 404, for the image
+    /// fallback: a private attachment or a dead link.
+    struct NotFoundHttpClient {
+        requested: Arc<std::sync::Mutex<Vec<String>>>,
+    }
 
-        struct ImageDocView;
-        impl gpui::Render for ImageDocView {
+    impl gpui::http_client::HttpClient for NotFoundHttpClient {
+        fn type_name(&self) -> &'static str {
+            "NotFoundHttpClient"
+        }
+
+        fn user_agent(&self) -> Option<&gpui::http_client::http::HeaderValue> {
+            None
+        }
+
+        fn proxy(&self) -> Option<&gpui::http_client::Url> {
+            None
+        }
+
+        fn send(
+            &self,
+            request: gpui::http_client::Request<gpui::http_client::AsyncBody>,
+        ) -> futures::future::BoxFuture<
+            'static,
+            anyhow::Result<gpui::http_client::Response<gpui::http_client::AsyncBody>>,
+        > {
+            self.requested
+                .lock()
+                .expect("request log is not poisoned")
+                .push(request.uri().to_string());
+            Box::pin(async move {
+                Ok(gpui::http_client::Response::builder()
+                    .status(404)
+                    .body(gpui::http_client::AsyncBody::from(Vec::new()))
+                    .expect("build the 404 response"))
+            })
+        }
+    }
+
+    /// Paint `markdown` in a `width`-wide column until its images settle.
+    fn paint_markdown_doc<'a>(
+        cx: &'a mut gpui::TestAppContext,
+        client: Arc<dyn gpui::http_client::HttpClient>,
+        markdown: &'static str,
+        width: f32,
+    ) -> &'a mut gpui::VisualTestContext {
+        struct DocView(&'static str, f32);
+        impl gpui::Render for DocView {
             fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
                 div()
                     .id("image-doc")
-                    .w(px(300.))
+                    .w(px(self.1))
                     .debug_selector(|| "image-doc".to_string())
                     .child(render_markdown_document(
-                        "<img alt=\"remote\" src=\"https://example.com/shot.png\" />\n\n<img alt=\"local\" src=\"file:///tmp/shot.png\" />",
+                        self.0,
                         theme::Theme::for_id(theme::ThemeId::Orbit),
                     ))
             }
         }
 
-        let view = cx.update(|_, cx| cx.new(|_| ImageDocView));
-        let paint = |cx: &mut gpui::VisualTestContext| {
+        let cx = cx.add_empty_window();
+        cx.update(|_, cx| {
+            cx.set_global(theme::Theme::for_id(theme::ThemeId::Orbit));
+            cx.set_http_client(client);
+        });
+        let view = cx.update(|_, cx| cx.new(|_| DocView(markdown, width)));
+        for _ in 0..4 {
             let view = view.clone();
             cx.draw(
                 point(px(0.), px(0.)),
-                gpui::size(px(500.), px(300.)),
+                gpui::size(px(width + 200.), px(600.)),
                 move |_, _| view.clone(),
             );
-        };
-        paint(cx);
-        cx.run_until_parked();
-        paint(cx);
-        cx.run_until_parked();
-        paint(cx);
+            cx.run_until_parked();
+        }
+        cx
+    }
 
-        assert!(
-            requested
-                .lock()
-                .expect("request log is not poisoned")
-                .is_empty(),
-            "rendering markdown must not construct an image request"
+    /// Remote Markdown images load inline, at their own size and aspect ratio;
+    /// a local file URL never loads and never opens.
+    #[gpui::test]
+    fn markdown_images_load_inline_and_local_files_stay_passive(cx: &mut gpui::TestAppContext) {
+        let requested = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cx = paint_markdown_doc(
+            cx,
+            Arc::new(PngHttpClient {
+                requested: requested.clone(),
+            }),
+            "<img alt=\"remote\" src=\"https://example.com/inline-shot.png\" />\n\n<img alt=\"local\" src=\"file:///tmp/shot.png\" />",
+            300.,
         );
-        assert!(cx.debug_bounds("image-doc").is_some());
-        assert!(
-            cx.debug_bounds("markdown-image-open-0-0-1-0")
-                .is_none(),
-            "a file URL has no Open action"
-        );
-        let open = cx
-            .debug_bounds("markdown-image-open-0-0-0-0")
-            .expect("an HTTPS image has an explicit Open action");
-        assert!(open.size.width > px(0.) && open.size.height > px(0.), "the Open action has a hit area: {open:?}");
+
         assert_eq!(
-            markdown_image_open_url("https://example.com/shot.png").as_deref(),
-            Some("https://example.com/shot.png")
+            requested.lock().expect("request log is not poisoned").as_slice(),
+            ["https://example.com/inline-shot.png"],
+            "only the HTTPS image is requested"
+        );
+        let image = cx
+            .debug_bounds("markdown-image-0-0-0-0")
+            .expect("the HTTPS image paints inline");
+        // The fixture is 200×100: narrower than the column, so it keeps its
+        // own width, and its height follows the 2:1 ratio.
+        assert_eq!(image.size.width, px(200.));
+        assert_eq!(image.size.height, px(100.));
+        assert!(
+            cx.debug_bounds("markdown-image-open-0-0-0-0").is_none(),
+            "a loaded image is the content, not a link card"
+        );
+        assert!(cx.debug_bounds("markdown-image-0-0-1-0").is_none());
+        assert!(
+            cx.debug_bounds("markdown-image-open-0-0-1-0").is_none(),
+            "a file URL has no Open action"
         );
         assert!(markdown_image_open_url("file:///tmp/shot.png").is_none());
     }
 
-    /// URL normalization still applies to the explicit browser action for a
-    /// quoted GitHub screenshot, but neither the signed nor the durable asset
-    /// URL is fetched while the reply renders.
+    /// An image wider than its column scales down to the column and keeps its
+    /// aspect ratio rather than squeezing the box.
     #[gpui::test]
-    fn quoted_reply_image_opens_the_durable_asset_without_fetching(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let cx = cx.add_empty_window();
+    fn a_wide_markdown_image_fits_its_column(cx: &mut gpui::TestAppContext) {
+        let cx = paint_markdown_doc(
+            cx,
+            Arc::new(PngHttpClient {
+                requested: Arc::default(),
+            }),
+            "![wide](https://example.com/wide-shot.png)",
+            120.,
+        );
+        let image = cx
+            .debug_bounds("markdown-image-0-0-0-0")
+            .expect("the image paints inline");
+        assert_eq!(image.size.width, px(120.));
+        assert_eq!(image.size.height, px(60.));
+    }
+
+    /// A quoted GitHub screenshot loads from its durable asset URL, not the
+    /// expired signed one.
+    #[gpui::test]
+    fn quoted_reply_image_loads_the_durable_asset(cx: &mut gpui::TestAppContext) {
         let requested = Arc::new(std::sync::Mutex::new(Vec::new()));
-        cx.update(|_, cx| {
-            cx.set_global(theme::Theme::for_id(theme::ThemeId::Orbit));
-            cx.set_http_client(Arc::new(PngHttpClient {
+        let cx = paint_markdown_doc(
+            cx,
+            Arc::new(PngHttpClient {
                 requested: requested.clone(),
-            }));
-        });
-
-        struct ReplyDocView;
-        impl gpui::Render for ReplyDocView {
-            fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
-                div().id("reply-doc").w(px(240.)).child(render_markdown_document(
-                    "> ### What happened?\n> <img alt=\"Image\" width=\"1450\" height=\"932\" src=\"https://private-user-images.githubusercontent.com/74659438/656345150-69f721c8-e025-44cd-8242-4e87eef54f7e.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.expired\">\n> ### Steps to reproduce\n> 1. Open OrbitPI on windows\n",
-                    theme::Theme::for_id(theme::ThemeId::Orbit),
-                ))
-            }
-        }
-
-        let view = cx.update(|_, cx| cx.new(|_| ReplyDocView));
-        let paint = |cx: &mut gpui::VisualTestContext| {
-            let view = view.clone();
-            cx.draw(
-                point(px(0.), px(0.)),
-                gpui::size(px(300.), px(300.)),
-                move |_, _| view.clone(),
-            );
-        };
-        paint(cx);
-        cx.run_until_parked();
-        paint(cx);
-        cx.run_until_parked();
-        paint(cx);
-
-        assert!(
-            requested
-                .lock()
-                .expect("request log is not poisoned")
-                .is_empty(),
-            "the quoted reply must not fetch either asset URL"
+            }),
+            "> ### What happened?\n> <img alt=\"Image\" width=\"1450\" height=\"932\" src=\"https://private-user-images.githubusercontent.com/74659438/656345150-69f721c8-e025-44cd-8242-4e87eef54f7e.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.expired\">\n> ### Steps to reproduce\n> 1. Open OrbitPI on windows\n",
+            240.,
         );
-        let open = cx
-            .debug_bounds("markdown-image-open-0-0-0-1")
-            .expect("the normalized durable URL has an Open action");
-        assert!(open.size.width > px(0.) && open.size.height > px(0.));
         assert_eq!(
-            markdown_image_open_url(&normalize_image_url("https://private-user-images.githubusercontent.com/74659438/656345150-69f721c8-e025-44cd-8242-4e87eef54f7e.png?jwt=expired")).as_deref(),
-            Some(
-                "https://github.com/user-attachments/assets/69f721c8-e025-44cd-8242-4e87eef54f7e"
-            )
+            requested.lock().expect("request log is not poisoned").as_slice(),
+            ["https://github.com/user-attachments/assets/69f721c8-e025-44cd-8242-4e87eef54f7e"],
+            "the durable asset is requested, never the expired signed URL"
         );
+        assert!(cx.debug_bounds("markdown-image-0-0-0-1").is_some());
+    }
+
+    /// An image that cannot load (a private attachment, a dead link) shows its
+    /// alt text and an explicit Open action instead.
+    #[gpui::test]
+    fn an_image_that_cannot_load_falls_back_to_open(cx: &mut gpui::TestAppContext) {
+        let requested = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cx = paint_markdown_doc(
+            cx,
+            Arc::new(NotFoundHttpClient {
+                requested: requested.clone(),
+            }),
+            "![shot](https://example.com/missing-shot.png)",
+            300.,
+        );
+        assert_eq!(requested.lock().expect("request log is not poisoned").len(), 1);
+        let open = cx
+            .debug_bounds("markdown-image-open-0-0-0-0")
+            .expect("a failed image offers Open");
+        assert!(open.size.width > px(0.) && open.size.height > px(0.));
+    }
+
+    /// The box arithmetic: an image keeps its own width up to the height cap,
+    /// and the ratio carries the height.
+    #[test]
+    fn markdown_image_width_follows_the_height_cap() {
+        let max_h = px(480.);
+        assert_eq!(
+            markdown_image_max_w(gpui::size(px(200.), px(100.)), max_h),
+            Some((px(200.), 2.))
+        );
+        assert_eq!(
+            markdown_image_max_w(gpui::size(px(2560.), px(1600.)), max_h),
+            Some((px(768.), 1.6))
+        );
+        assert_eq!(
+            markdown_image_max_w(gpui::size(px(1000.), px(5000.)), max_h),
+            Some((px(96.), 0.2))
+        );
+        assert_eq!(markdown_image_max_w(gpui::size(px(0.), px(10.)), max_h), None);
+    }
+
+    /// GPUI's asset cache never evicts, so the transcript holds each decoded
+    /// bitmap only until the budget pushes the least recently painted one out
+    /// — and never one the current frame is still drawing.
+    #[test]
+    fn decoded_markdown_images_are_released_oldest_first() {
+        // A 4×4 RGBA frame is 64 bytes, so a 100-byte budget holds one.
+        let bitmap = |edge: u32| {
+            Arc::new(gpui::RenderImage::new(vec![image::Frame::new(
+                image::RgbaImage::new(edge, edge),
+            )]))
+        };
+        let mut bitmaps = MarkdownImageBitmaps {
+            byte_budget: 100,
+            ..Default::default()
+        };
+        assert!(bitmaps.retain("a".into(), bitmap(4)).is_empty());
+        // `a` scrolled away a while ago; `b` needs the room.
+        bitmaps.entries.get_mut("a").expect("recorded").used =
+            Instant::now() - MARKDOWN_IMAGE_RELEASE_AGE * 2;
+        let released = bitmaps.retain("b".into(), bitmap(4));
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].0, "a", "the least recently painted image goes");
+        assert_eq!(bitmaps.bytes, 64);
+
+        // Both were painted this frame: over budget is not a reason to reload
+        // what is on screen.
+        let mut visible = MarkdownImageBitmaps {
+            byte_budget: 0,
+            ..Default::default()
+        };
+        assert!(visible.retain("a".into(), bitmap(4)).is_empty());
+        assert!(visible.retain("b".into(), bitmap(4)).is_empty());
+        assert_eq!(visible.entries.len(), 2);
     }
 
     /// Issue #80: an agent call the reader never touched must obey Settings →

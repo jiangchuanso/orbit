@@ -3,7 +3,6 @@ import Script from "next/script";
 import { Architecture } from "@/components/sections/architecture";
 import { Capabilities } from "@/components/sections/capabilities";
 import { Closer } from "@/components/sections/closer";
-import { Contributors } from "@/components/sections/contributors";
 import { Faq } from "@/components/sections/faq";
 import { Hero } from "@/components/sections/hero";
 import { Highlights } from "@/components/sections/highlights";
@@ -33,7 +32,6 @@ export async function Landing({ locale }: { locale: Locale }) {
         <Tour locale={locale} />
         <Capabilities locale={locale} />
         <Architecture locale={locale} />
-        <Contributors locale={locale} />
         <Reviews locale={locale} />
         <Faq locale={locale} />
         <Closer locale={locale} />

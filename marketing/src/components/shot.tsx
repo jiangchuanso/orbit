@@ -19,6 +19,7 @@ export function Shot({
   priority = false,
   sizes = "(max-width: 768px) 100vw, (max-width: 1280px) 92vw, 1180px",
   className = "",
+  framed = false,
 }: {
   src: string;
   srcLight?: string;
@@ -28,6 +29,11 @@ export function Shot({
   priority?: boolean;
   sizes?: string;
   className?: string;
+  /**
+   * A close crop of the window (no chrome of its own) gets a window's edge: a
+   * hairline, the product radius, and a fade over the side its text runs off.
+   */
+  framed?: boolean;
 }) {
   const { register, open } = useLightbox();
   const id = useId();
@@ -45,7 +51,9 @@ export function Shot({
         ref={buttonRef}
         type="button"
         onClick={() => open(id)}
-        className="block w-full cursor-zoom-in outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
+        className={`block w-full cursor-zoom-in${
+          framed ? " shot-framed rounded-[16px] border border-edge-default bg-surface-1" : ""
+        }`}
       >
         <Image
           src={src}

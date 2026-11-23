@@ -208,6 +208,27 @@ impl WallpaperSettings {
         matches!(self.mode, WallpaperMode::Hero | WallpaperMode::FullWindow) && self.path.is_some()
     }
 
+    /// The picture carries the animated field: an artwork effect is on at
+    /// some strength over an image that actually paints. The new-task page's
+    /// drifting tone, monogram and light then move over the wallpaper too,
+    /// printed in that effect's own screen ([`Self::screen`]).
+    pub fn animates(&self) -> bool {
+        self.enabled() && self.effect_intensity > 0.0 && self.screen().is_some()
+    }
+
+    /// The moving screen that matches the still artwork effect, `None` for a
+    /// plain photograph.
+    pub fn screen(&self) -> Option<crate::backdrop::Screen> {
+        use crate::backdrop::Screen;
+        match self.effect {
+            Effect::None => None,
+            Effect::Dither => Some(Screen::Dither),
+            Effect::Halftone => Some(Screen::Halftone),
+            Effect::Ascii => Some(Screen::Ascii),
+            Effect::Scanlines => Some(Screen::Scanlines),
+        }
+    }
+
     /// The Desktop background is chosen. It needs no image; whether it can
     /// actually frost is [`desktop_frost_available`]'s call.
     pub fn desktop(&self) -> bool {
@@ -1283,11 +1304,29 @@ pub fn decorate(theme: Theme) -> Theme {
 
 /// The one wallpaper layer, absolutely filling its parent. `None` when no
 /// image is ready, so callers can fall back to the normal page backdrop.
-pub fn layer(theme: Theme, reduce_motion: bool) -> Option<AnyElement> {
-    layer_inner(theme, reduce_motion, "wallpaper-layer")
+///
+/// `phase` is the field's clock (the new-task backdrop's, in seconds). With an
+/// artwork effect on, the field is painted over the picture at that phase in
+/// the effect's own screen. `field_live` says whether it is moving: only on the
+/// new-task page, in a frontmost window, without Reduce Motion. Everywhere
+/// else it holds the frame it was showing, so a chat over the wallpaper costs
+/// no raster, no upload and no repaint.
+pub fn layer(
+    theme: Theme,
+    reduce_motion: bool,
+    phase: f32,
+    field_live: bool,
+) -> Option<AnyElement> {
+    layer_inner(theme, reduce_motion, phase, field_live, "wallpaper-layer")
 }
 
-fn layer_inner(theme: Theme, reduce_motion: bool, id: &'static str) -> Option<AnyElement> {
+fn layer_inner(
+    theme: Theme,
+    reduce_motion: bool,
+    phase: f32,
+    field_live: bool,
+    id: &'static str,
+) -> Option<AnyElement> {
     let settings = settings();
     if !settings.enabled() {
         return None;
@@ -1309,6 +1348,28 @@ fn layer_inner(theme: Theme, reduce_motion: bool, id: &'static str) -> Option<An
                 .object_fit(ObjectFit::Cover)
                 .opacity(theme.wallpaper.image_opacity),
         )
+        // A treated picture carries the new-task page's living field: the
+        // same tone, monogram and light, printed in the effect's own screen at
+        // its pixel size, on a clear plane, at the picture's own opacity so it
+        // belongs to the image rather than floating over it.
+        .when_some(settings.screen().filter(|_| settings.animates()), |layer, screen| {
+            layer.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .opacity(theme.wallpaper.image_opacity)
+                    .child(crate::backdrop::overlay(
+                        theme,
+                        screen,
+                        settings.effect_scale,
+                        phase,
+                        field_live && !reduce_motion,
+                    )),
+            )
+        })
         .when(settings.shows_bottom_fade(), |layer| {
             // Fade the visible crop, not the source pixels, so resizing and
             // cover fitting keep the fade anchored to the bottom of the placement.
@@ -1347,7 +1408,7 @@ fn layer_inner(theme: Theme, reduce_motion: bool, id: &'static str) -> Option<An
 /// distinct element id so settings can show it while the window layer is also
 /// mounted.
 pub fn preview(theme: Theme) -> Option<AnyElement> {
-    layer_inner(theme, true, "wallpaper-preview-layer")
+    layer_inner(theme, true, 0., false, "wallpaper-preview-layer")
 }
 
 // ── tests ──────────────────────────────────────────────────────────────────
@@ -1485,6 +1546,69 @@ mod tests {
         assert_eq!(parsed.card_opacity, CARD_OPACITY_RANGE.0);
         assert!(!parsed.derive_accent);
         assert!(!parsed.bottom_fade, "existing settings do not opt in");
+    }
+
+    /// A picture that paints with any artwork effect at some strength carries
+    /// the animated field, in that effect's own screen; a plain photograph, a
+    /// zero-strength effect, a missing image and the Desktop background stay
+    /// still.
+    #[test]
+    fn a_treated_picture_animates_in_its_own_screen() {
+        let dithered = WallpaperSettings {
+            mode: WallpaperMode::FullWindow,
+            effect: Effect::Dither,
+            effect_intensity: 0.35,
+            path: Some(PathBuf::from("/tmp/a.png")),
+            ..WallpaperSettings::default()
+        };
+        assert!(dithered.animates());
+        assert!(WallpaperSettings {
+            mode: WallpaperMode::Hero,
+            ..dithered.clone()
+        }
+        .animates());
+        use crate::backdrop::Screen;
+        for (effect, screen) in [
+            (Effect::Dither, Screen::Dither),
+            (Effect::Halftone, Screen::Halftone),
+            (Effect::Ascii, Screen::Ascii),
+            (Effect::Scanlines, Screen::Scanlines),
+        ] {
+            let treated = WallpaperSettings {
+                effect,
+                ..dithered.clone()
+            };
+            assert!(treated.animates(), "{effect:?}");
+            assert_eq!(treated.screen(), Some(screen));
+        }
+        for still in [
+            WallpaperSettings {
+                effect: Effect::None,
+                ..dithered.clone()
+            },
+            WallpaperSettings {
+                effect_intensity: 0.0,
+                ..dithered.clone()
+            },
+            WallpaperSettings {
+                path: None,
+                ..dithered.clone()
+            },
+            WallpaperSettings {
+                mode: WallpaperMode::Desktop,
+                ..dithered.clone()
+            },
+        ] {
+            assert!(!still.animates(), "{still:?}");
+        }
+        // The applied dithered hero is one that animates.
+        let applied = WallpaperSettings {
+            path: Some(PathBuf::from("/tmp/a.png")),
+            ..WallpaperSettings::default()
+        }
+        .apply_dithered_hero()
+        .expect("an image");
+        assert!(applied.animates());
     }
 
     #[test]

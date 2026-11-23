@@ -208,6 +208,8 @@ impl OrbitApp {
             .action(self.subagent_button(
                 "subagents-inactive-plugins",
                 tr!("subagents_ui.open_plugins"),
+                None,
+                false,
                 ButtonVariant::Secondary,
                 theme,
                 this,
@@ -475,7 +477,7 @@ impl OrbitApp {
                     .size(px(26.))
                     .flex_none()
                     .rounded(Radius::Medium.px(&theme))
-                    .bg(theme.surface_elevated)
+                    .bg(theme.control_face(theme.surface_elevated))
                     .border_1()
                     .border_color(theme.hairline())
                     .flex()
@@ -582,13 +584,17 @@ impl OrbitApp {
             .map(|agent| self.subagent_config.agent_enabled(agent.name()))
             .unwrap_or(true);
         let name_now = editor.name.read(cx).text().trim().to_string();
-        let builtin_unchanged =
+        let is_builtin_agent =
             selected.is_some_and(|agent| agent.path.is_none() && agent.name() == name_now);
         let overrides_builtin = editor.path.is_some()
             && subagent_file::builtin_agents()
                 .iter()
                 .any(|builtin| builtin.name() == name_now);
         let dirty = editor.is_dirty(cx);
+        // The primary control only ever writes a change, so it stays disabled
+        // until there is one: a saved agent reopened unchanged, or a draft
+        // nobody typed into, has nothing to save.
+        let can_save = editor.has_unsaved_edits(cx);
 
         let header = self.subagent_header(
             theme,
@@ -596,8 +602,10 @@ impl OrbitApp {
             editor,
             enabled,
             dirty,
-            builtin_unchanged,
+            can_save,
+            is_builtin_agent,
             overrides_builtin,
+            builtin_save_tip(&name_now, is_builtin_agent),
         );
 
         let mut column = div()
@@ -696,23 +704,17 @@ impl OrbitApp {
         editor: &SubagentEditor,
         enabled: bool,
         dirty: bool,
-        builtin_unchanged: bool,
+        can_save: bool,
+        is_builtin_agent: bool,
         overrides_builtin: bool,
+        action_tip: Option<SharedString>,
     ) -> AnyElement {
-        let (source_label, action_label) = if editor.is_new {
-            (tr!("subagents_ui.new"), tr!("subagents_ui.create"))
-        } else if editor.path.is_none() && builtin_unchanged {
-            (
-                tr!("subagents_ui.built_in"),
-                tr!("subagents_ui.create_override"),
-            )
-        } else if editor.path.is_none() {
-            (tr!("subagents_ui.new"), tr!("subagents_ui.create"))
-        } else if overrides_builtin {
-            (tr!("subagents_ui.modified"), tr!("subagents_ui.save"))
-        } else {
-            (tr!("subagents_ui.yours"), tr!("subagents_ui.save"))
-        };
+        let (source_label, action_label) = subagent_action_labels(
+            editor.is_new,
+            editor.path.is_some(),
+            is_builtin_agent,
+            overrides_builtin,
+        );
         let mode = mode_label(editor.mode);
         let ceiling = capability_label(subagent_file::ceiling_for_tools(editor.tools.as_deref()));
         let mut meta = vec![source_label, ceiling, mode];
@@ -805,13 +807,29 @@ impl OrbitApp {
         // Leaving with edits asks first, in place of the actions it would
         // otherwise run beside, so the question sits where the eye already
         // is and the edits stay on screen while the user decides.
-        if self.subagent_discard_pending.is_some() {
+        if let Some(pending) = &self.subagent_discard_pending {
             // The name it was opened under: the one in the list.
             let name = editor.baseline.name.trim().to_string();
-            let hint = if name.is_empty() {
-                tr!("subagents_ui.discard_confirm_draft")
-            } else {
-                tr!("subagents_ui.discard_confirm_hint", name = name)
+            // A held navigation names where the click was going, so the
+            // section row it started from does not read as a no-op.
+            let destination = match pending {
+                SubagentAction::NavigateSettings(section) => {
+                    Some(super::settings::settings_section_label(*section))
+                }
+                _ => None,
+            };
+            let hint = match destination {
+                Some(destination) if name.is_empty() => tr!(
+                    "subagents_ui.discard_confirm_navigate_draft",
+                    section = destination
+                ),
+                Some(destination) => tr!(
+                    "subagents_ui.discard_confirm_navigate",
+                    name = name,
+                    section = destination
+                ),
+                None if name.is_empty() => tr!("subagents_ui.discard_confirm_draft"),
+                None => tr!("subagents_ui.discard_confirm_hint", name = name),
             };
             let confirm = div()
                 .debug_selector(|| "subagents-discard-confirm".to_string())
@@ -871,9 +889,14 @@ impl OrbitApp {
                     SubagentAction::Duplicate,
                 ))
             })
-            .child(self.subagent_primary_button(
+            // The one filled control: it writes, so it is enabled only when
+            // there is a difference to write.
+            .child(self.subagent_button(
                 "subagents-save",
                 action_label.clone(),
+                action_tip,
+                !can_save,
+                ButtonVariant::Primary,
                 theme,
                 this.clone(),
                 SubagentAction::Save,
@@ -1671,7 +1694,7 @@ impl OrbitApp {
                     .size(px(26.))
                     .flex_none()
                     .rounded(Radius::Medium.px(&theme))
-                    .bg(theme.surface_elevated)
+                    .bg(theme.control_face(theme.surface_elevated))
                     .border_1()
                     .border_color(theme.hairline())
                     .flex()
@@ -1999,7 +2022,7 @@ impl OrbitApp {
             .border_1()
             .border_color(theme.hairline())
             .rounded(button::radius(ButtonSize::Medium).px(&theme))
-            .raised(theme.surface_elevated, &theme)
+            .raised(theme.control_face(theme.surface_elevated), &theme)
             .child(minus)
             .child(
                 div()
@@ -2050,7 +2073,7 @@ impl OrbitApp {
         this: Entity<OrbitApp>,
         action: SubagentAction,
     ) -> AnyElement {
-        self.subagent_button(id, label, ButtonVariant::Primary, theme, this, action)
+        self.subagent_button(id, label, None, false, ButtonVariant::Primary, theme, this, action)
     }
 
     fn subagent_secondary_button(
@@ -2061,7 +2084,16 @@ impl OrbitApp {
         this: Entity<OrbitApp>,
         action: SubagentAction,
     ) -> AnyElement {
-        self.subagent_button(id, label, ButtonVariant::Secondary, theme, this, action)
+        self.subagent_button(
+            id,
+            label,
+            None,
+            false,
+            ButtonVariant::Secondary,
+            theme,
+            this,
+            action,
+        )
     }
 
     fn subagent_danger_button(
@@ -2072,20 +2104,36 @@ impl OrbitApp {
         this: Entity<OrbitApp>,
         action: SubagentAction,
     ) -> AnyElement {
-        self.subagent_button(id, label, ButtonVariant::Danger, theme, this, action)
+        self.subagent_button(
+            id,
+            label,
+            None,
+            false,
+            ButtonVariant::Danger,
+            theme,
+            this,
+            action,
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn subagent_button(
         &self,
         id: &'static str,
         label: String,
+        tip: Option<SharedString>,
+        disabled: bool,
         kind: ButtonVariant,
         theme: Theme,
         this: Entity<OrbitApp>,
         action: SubagentAction,
     ) -> AnyElement {
-        Button::new(id, kind)
-            .label(label)
+        let button = Button::new(id, kind).label(label).disabled(disabled);
+        let button = match tip {
+            Some(tip) => button.tip(tip),
+            None => button,
+        };
+        button
             .on_mouse_up(&theme, move |_, window, cx| {
                 let action = action.clone();
                 this.update(cx, |app, cx| {
@@ -2823,7 +2871,7 @@ fn detail_badge(glyph: &'static str, theme: &Theme) -> impl IntoElement {
         .size(px(36.))
         .flex_none()
         .rounded(Radius::Large.px(theme))
-        .bg(theme.surface_elevated)
+        .bg(theme.control_face(theme.surface_elevated))
         .border_1()
         .border_color(theme.hairline())
         .flex()
@@ -2931,6 +2979,44 @@ fn mode_label(mode: &str) -> String {
         "ask" => tr!("subagents_ui.mode_ask"),
         _ => tr!("subagents_ui.mode_inherit"),
     }
+}
+
+/// The source chip and the primary button for the open form. The button names
+/// the one write it can make — **Create** for a draft, **Save** for an agent
+/// that already has a file or a built-in to override — and the caller disables
+/// it until the form differs from what was loaded, so the label never has to
+/// carry a "nothing to save" state.
+fn subagent_action_labels(
+    is_new: bool,
+    has_file: bool,
+    is_builtin: bool,
+    overrides_builtin: bool,
+) -> (String, String) {
+    if is_new || (!is_builtin && !has_file) {
+        // A draft, or a built-in renamed before its first save: this writes a
+        // new agent under the name in the field.
+        (tr!("subagents_ui.new"), tr!("subagents_ui.create"))
+    } else if is_builtin {
+        (tr!("subagents_ui.built_in"), tr!("subagents_ui.save"))
+    } else if overrides_builtin {
+        (tr!("subagents_ui.modified"), tr!("subagents_ui.save"))
+    } else {
+        (tr!("subagents_ui.yours"), tr!("subagents_ui.save"))
+    }
+}
+
+/// What saving a built-in writes, where the button that saves it sits. The
+/// File section says the same thing, but it is below the fold.
+fn builtin_save_tip(name: &str, is_builtin: bool) -> Option<SharedString> {
+    is_builtin.then(|| {
+        SharedString::from(tr!(
+            "subagents_ui.builtin_note",
+            path = subagent_file::agents_dir()
+                .join(format!("{name}.md"))
+                .display()
+                .to_string()
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -3278,6 +3364,95 @@ mod tests {
                 assert!(!app.close_settings(cx));
                 app.apply_subagent_action(SubagentAction::ConfirmDiscard, cx);
                 assert!(!app.settings_open);
+            })
+        });
+    }
+
+    /// The primary control is one write: **Create** for a draft, **Save** for
+    /// anything with a file (or a built-in to override). The caller disables it
+    /// until the form differs, so the label never has to say "no changes".
+    #[test]
+    fn the_primary_button_names_the_write_it_makes() {
+        let labels = |is_new, has_file, is_builtin, overrides_builtin| {
+            let (source, action) =
+                subagent_action_labels(is_new, has_file, is_builtin, overrides_builtin);
+            (source, action)
+        };
+
+        assert_eq!(labels(false, true, false, false), ("yours".into(), "Save".into()));
+        assert_eq!(labels(false, true, false, true), ("modified".into(), "Save".into()));
+        assert_eq!(
+            labels(false, false, true, false),
+            ("Built in".into(), "Save".into())
+        );
+        // A built-in renamed before its first save writes a new agent.
+        assert_eq!(labels(false, false, false, false), ("New".into(), "Create".into()));
+        assert_eq!(labels(true, false, false, false), ("New".into(), "Create".into()));
+    }
+
+    /// The button's enabled state is the form's, so a reopened agent and an
+    /// untouched draft both open with nothing to write.
+    #[gpui::test]
+    fn nothing_is_writable_until_the_form_differs(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::for_id(ThemeId::Orbit)));
+        let cx = cx.add_empty_window();
+        let app = cx.update(|_, cx| cx.new(OrbitApp::new));
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.subagents = crate::subagent_file::builtin_agents();
+                app.selected_subagent = Some(app.subagents[0].name().to_string());
+                app.rebuild_subagent_editor(cx);
+                assert!(
+                    !app.subagent_editor.as_ref().unwrap().has_unsaved_edits(cx),
+                    "a reopened built-in is settled"
+                );
+                let prompt = app.subagent_editor.as_ref().unwrap().prompt.clone();
+                prompt.update(cx, |input, cx| input.set_text("edited", cx));
+                assert!(app.subagent_editor.as_ref().unwrap().has_unsaved_edits(cx));
+
+                app.start_new_subagent(cx);
+                assert!(
+                    !app.subagent_editor.as_ref().unwrap().has_unsaved_edits(cx),
+                    "an untouched draft has nothing to create"
+                );
+            })
+        });
+    }
+
+    /// A refused section switch must not move the nav cursor onto the row it
+    /// refused: the keyboard cursor marks what is open, and the open section
+    /// is still Subagents.
+    #[gpui::test]
+    fn a_held_section_switch_keeps_the_nav_cursor_on_the_open_section(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| cx.set_global(Theme::for_id(ThemeId::Orbit)));
+        let cx = cx.add_empty_window();
+        let app = cx.update(|_, cx| cx.new(OrbitApp::new));
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.settings_open = true;
+                app.subagents = crate::subagent_file::builtin_agents();
+                app.selected_subagent = Some(app.subagents[0].name().to_string());
+                app.set_settings_section_unchecked(SettingsSection::Subagents, cx);
+                app.rebuild_subagent_editor(cx);
+                let open_at = app.settings_nav_cursor;
+                assert_ne!(open_at, 0, "Subagents is not the first nav row");
+                let prompt = app.subagent_editor.as_ref().unwrap().prompt.clone();
+                prompt.update(cx, |input, cx| input.set_text("edited", cx));
+
+                // General, the first row: held while the form is dirty.
+                app.activate_settings_nav_row(0, cx);
+                assert_eq!(app.settings_section, SettingsSection::Subagents);
+                assert!(app.subagent_discard_pending.is_some());
+                assert_eq!(
+                    app.settings_nav_cursor, open_at,
+                    "the cursor follows the open section, not the refused row"
+                );
+
+                app.apply_subagent_action(SubagentAction::ConfirmDiscard, cx);
+                assert_eq!(app.settings_section, SettingsSection::General);
+                assert_eq!(app.settings_nav_cursor, 0);
             })
         });
     }

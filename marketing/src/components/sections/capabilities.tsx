@@ -49,8 +49,8 @@ export async function Capabilities({ locale }: { locale: Locale }) {
                 </h3>
                 <ul className="mt-5 flex flex-col gap-2.5">
                   {group.items.map((item) => (
-                    <li key={item} className="flex gap-3 text-[13px] leading-[1.6] text-ink-2">
-                      <span aria-hidden className="mt-[8px] size-1 shrink-0 rounded-full bg-ink-3" />
+                    <li key={item} className="flex gap-3 text-[14px] leading-[1.6] text-ink-2">
+                      <span aria-hidden className="mt-[9px] size-1 shrink-0 rounded-full bg-ink-3" />
                       {item}
                     </li>
                   ))}

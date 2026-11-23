@@ -334,11 +334,11 @@ fn spawn_backdrop_clock(cx: &mut App, app: &Entity<OrbitApp>) {
     let field = app.clone();
     cx.spawn(async move |cx: &mut AsyncApp| {
         loop {
-            // 30 Hz while the field is moving — a full-window raster is ~5.6 ms,
-            // so a 33 ms beat leaves the raster off the critical path. The
-            // field only advances a frame when the phase crosses one, so a
-            // page that is not on screen asks for nothing.
-            let delay = Duration::from_millis(33);
+            // One beat per field frame while the field is moving (10 Hz; see
+            // `backdrop::FPS` for why that is enough). The field only advances
+            // a frame when the phase crosses one, so a page that is not on
+            // screen asks for nothing.
+            let delay = crate::backdrop::frame_interval();
             Timer::after(delay).await;
             let Ok(moving) = field.update(cx, |app: &mut OrbitApp, cx| app.tick_backdrop(cx)) else {
                 return;

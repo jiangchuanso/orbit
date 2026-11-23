@@ -1,49 +1,76 @@
 # Plan — Micro-interactions
 
-**Status:** **Everything but P3b's rollout, P4e, and the two perf captures is complete.** The primitives (29 headless
-tests), `Motion::Travel`, the three-way `MotionPreference`, and the `nominal()` fixes are
-in. `motion::interactive` fades a hover's fill and ink on `Interaction`, keyed by the
+**Status:** **Everything but P3b's rollout, the terminal and Git half of P4e, and the
+two perf captures is complete.** The primitives (35 headless
+tests), `Motion::Travel`, the three-way `MotionPreference`, `motion/panel.rs`, and the
+`nominal()` fixes are in. `motion::interactive` fades a hover's fill and ink on `Interaction`, keyed by the
 transition registry, with `Hover::row` / `wash` / `fill` naming the pair; it is adopted on
 the composer's send button, every Settings → Runtime action button, and the two segmented
 controls (composer delivery mode, Reduce Motion). **A press cannot scale and an
 unreserved focus ring cannot fade on gpui 0.2.2** — `DESIGN.md` §The interaction layer
-records both limits. 208 `hover_state` call sites remain — the count grew from 202 while
-this work was in flight, because the concurrent subagents feature added six — and ~190 of
-them continue chaining, so the styling call has to move last before they can adopt. **P4c is complete** — all 8
+records both limits. 63 `hover_state` call sites remain (measured on this tree; the 208 in this
+paragraph's first draft was a much earlier count), and most of them continue chaining, so the
+styling call has to move last before they can adopt. **P4c is complete** — all 8
 modal cards fade in on `Layout` — and **P4b is complete**: all 19 anchored popovers enter
 through the chokepoint, 16 of them with travel, and the geometry tests that measure a
 popup's resting place now ask for the settled frame explicitly. **P4f is complete**: the
 send button morphs between a square and a labelled button through one wrapper with two
-roles. P0's two `⌘⌥P` captures are still pending because they need a running build; P4e
-and the rest of P3b are open.
+roles. **P4e is shipped** — the sessions sidebar, Review / a subagent tab, the Explorer,
+session details and the bottom terminal strip all slide through one primitive. The Git
+page turned out not to be a dock at all (see P4e), so it moves to the page-entrance
+work rather than staying here. P0's two `⌘⌥P` captures are still pending because they need
+a running build; the rest of P3b is open.
 
-**What is left, precisely.** P3b: 208 `hover_state` sites, each needing the motion call
+**P3b progress — the enabler, and the component layer.** `motion::fade`
+(`motion/interactive.rs`) is the forwarding wrapper this plan asked for, and it turned out
+to cost six lines rather than sixty methods. `Styled`, `InteractiveElement` and
+`StatefulInteractiveElement` each have exactly **one** required hook (`style`,
+`interactivity`, and nothing) — every other method is a default body that mutates it. So
+`Hovered<T>` hands out the inner element's style memory and interactivity and inherits all
+~250 methods: a chain can keep styling, adding handlers and adding children after the fade,
+which is why adoption no longer changes anything a caller sees.
+
+Adopted, in order of reach:
+
+| Component | Sites it covers |
+|---|---|
+| `Button` (every variant that is fill-only) | 202 call sites |
+| `IconButton` | 60 call sites |
+| `TreeRow` (Explorer + review tree) | 5 call sites, every row |
+| `header_ghost_button` | the flat top-bar controls |
+| the transcript's code-fold / diagram-source / changed-files toggles | 3 |
+
+`motion::hover` is `fade(..).into_any_element()`, so its 75 existing adopters are untouched.
+Variants whose hover changes more than a fill — `Tinted`, `Danger`, `Destructive`, `Glass` —
+keep their one-frame swap by construction: `swap_hover` is now `variant.fade(theme).is_none()`.
+
+**What is left, precisely.** P3b: 78 `hover_*` sites, each needing the motion call
 moved to the end of its chain (≈190 of them keep chaining) — mechanical, per site, and a
-candidate for the `ParentElement`-forwarding wrapper described in §Mechanisms. P4e: the
-four panels need a persistent mount, an out-of-entity width and a generation counter —
-an `App`-state change rather than a call-site edit. P0/P5: the two `⌘⌥P` captures, which
-need a running build.
+candidate for the `ParentElement`-forwarding wrapper described in §Mechanisms. P4e and P4g
+are done. What remains is that hover rollout, the two perf captures, and the dock tab
+switch, which is deliberately instant (see P4g). P0/P5: the two
+`⌘⌥P` captures, which need a running build.
 
 ## Status at a glance
 
 | Phase | What ships | Status | Gate |
 |---|---|---|---|
 | P0 | Baseline capture and the motion test harness | Harness in; captures pending | Two `⌘⌥P` captures stored beside `docs/performance-baseline.md` |
-| P1 | `src/motion/` primitives (`Transition`, `Travel`, `bezier`; `Spring` and `Disclosure` were built, never adopted, and removed — restore from git history for P4e) | Complete | `cargo test -p orbit-pi motion::` — 29 tests, headless |
+| P1 | `src/motion/` primitives (`Transition`, `Travel`, `bezier`, `panel::slide`; `Spring` and `Disclosure` were built, never adopted, and removed — `panel::slide` covers what they were for) | Complete | `cargo test -p orbit-pi motion::` — 35 tests, headless |
 | P2 | `Motion::Travel`, three-way `MotionPreference`, the `nominal()` leak | Complete | Preference resolves in one place; `check_motion.py` forbids `nominal()` |
-| P3 | The interaction layer, adopted control by control | P3a complete (hover, `control`, `state`); P3b is a per-site rollout — 208 `hover_state` sites | `hover_fades_*`, `a_control_tracks_hover_and_selection_separately` pass |
+| P3 | The interaction layer, adopted control by control | P3a complete (hover, `control`, `state`, `fade`); P3b covers the component layer (`Button`, `IconButton`, `TreeRow`, `Tab`, header controls) and parent-driven reveals (`motion::follow`, the sidebar project header's actions) — the remaining `hover_*` sites are all leaf surfaces | `hover_fades_*`, `a_control_tracks_hover_and_selection_separately`, `a_fade_keeps_the_children_added_after_it` pass |
 | P4a | One `disclosure_chevron`, adopted by every swap site | Complete — 0 glyph swaps left | No `chevron-down`/`chevron-right` ternary remains outside the helper |
 | P4b | Popover entrance through `anchored_popover*` | Complete — all 19 sites enter through the chokepoint | Every anchored surface fades; the 16 with an anchor edge also travel |
 | P4c | Dialog entrance composed around `modal_card` | Complete: all 8 modals fade on `Layout` | Callers apply the entrance; `modal_card` supplies the frame. The scrim is unchanged, and no scale is possible |
 | P4d | Switch knob, segment selection | Complete | Knob travel is 18px at default settings and follows resolved padding; a segment fades both states |
-| P4e | Panel slides (explorer, terminal, Git, side pane) | Not started | Every panel eases its own width |
+| P4e | Panel slides (explorer, terminal, Git, side pane) | Complete for every docked panel: sidebar, side pane, Explorer, session details and the terminal strip. The Git page is a whole-column page, not a dock — it belongs with navigation | Every panel eases its own width |
+| P4g | Page and section entrance (`motion::arrive`) | Complete — feature pages and Settings sections fade in place; a dock tab switch stays instant | The page measures the same with the entrance as without, and Reduce Motion paints it opaque at once |
 | P4f | Composer send morph | Complete | Idle with a payload the button names Send; running it folds to a square |
 | P5 | Guards, CI job, DESIGN/audit status flip, perf re-capture | Guards and the CI job done; perf capture pending a running build | `design-guards` job runs on every push and gates `build` |
 
 Estimates: P1 2d · P2 1.5d · P3 3d · P4a 0.5d · P4b 1d · P4c 1d · P4d 1d · P4e 2d ·
 P4f 1d · P5 1d. P0 → P1 → P2 are sequential. P4b and P4c need only P1 and can run in
-parallel with P2/P3; P4a, P4d and P4f need P2's roles; P4e needs P1's `Spring`; P5 needs
-everything.
+parallel with P2/P3; P4a, P4d and P4f need P2's roles; P4e needs P1's primitives; P5 needs everything.
 
 **P1 progress.** `motion/{ease,transition,spring,reveal,registry}.rs` plus `mod.rs`.
 `ease` owns the curves (`linear`, `ease_out_quint`, `bezier`) and `theme::tokens::chart`
@@ -374,15 +401,71 @@ changes and the motion does not.
 
 ### P4e — Panels (2d)
 
-Generalise the sidebar's slide (`app/view.rs:961-990, 1057-1075, 1339-1360`, keyed by
-`sidebar_slide_gen`, `app.rs:360`) into `panel_slide(gen, open, from, to, theme)`, backed
-by `Spring` for a width change and by `Layout` where the panel is not resizable. Apply to
-the explorer (`explorer/panel.rs`), the side pane (`sidepane.rs`), the terminal
-(`terminal.rs`) and the Git panel (`git_panel/mod.rs`). Reuse the existing generation
-contract: increments at `session.rs:2755`, `sidebar.rs:3482, 3706`.
+**Shipped for the docked panels.** `motion::panel::slide` (`crates/orbit-pi/src/motion/panel.rs`)
+replaces the ad-hoc `sidebar_slide_gen` counter with a `Transition` in the shared registry,
+so the animation is interruptible: a close caught by a reopen resumes from the extent on
+screen rather than from either end, which is what `DESIGN.md` asks of a reversible
+transition. The plan expected a `Spring`; a `Transition` plus the role's decelerating curve
+is enough for a one-shot width change, and it was already in the tree.
 
-**Gate:** a panel reopened mid-slide resumes from the painted width; no panel animates on
-launch (`gen == 0` renders settled).
+The mechanism is the shape the plan predicted: the panel keeps its settled extent and an
+outer wrapper clips it, so the content is uncovered rather than squeezed, and a closing
+panel stays mounted for the whole slide (`Mount::WhileOpen`) — it leaves the tree once it
+has arrived, so a closed dock costs nothing. The sessions sidebar is the one panel that
+stays mounted while closed (`Mount::Always`), because `⌘⇧B` moves focus into a column whose
+`FocusHandle` has to be in the tree.
+
+`Anchor` names the axis and the edge together: `Left` and `Right` animate a width on a row,
+`Bottom` animates a height on a column. Adopted on `crates/orbit-pi/src/app/view.rs`:
+`right_dock_slide` for Review / a subagent tab / the Explorer / session details, the sidebar
+itself, and the bottom terminal strip (the only `Bottom`). The two elements that ride the
+sidebar's edge — the top bar's leading pad and the titlebar controls' left offset — read
+`panel::progress(SIDEBAR)` at render time instead of animating a second clock, so they
+cannot drift from the panel. The one deliberate non-animation is preserved:
+`panel::settle(SIDEBAR, true)` when a full-width Review pane opens the sidebar, so the
+session view never peeks through the gap mid-slide.
+
+The terminal is the interesting case for the mount rule: its strip used to be gated on
+`terminal_visible`, which folds in `is_open()` — so closing it unmounted the row on the
+same frame and there was nothing to animate. The strip is now mounted whenever the chat
+column is, and the slide's own `open` (the panel's flag) decides whether to paint it.
+
+**Why the Git page is not here.** It has no neighbour to take the width back: opening Git
+replaces the whole column with a card, exactly like Files and Usage. A width slide would be
+a lie about what moved. It wants the same treatment as the other page swaps — the incoming
+card's entrance — which is not a panel primitive.
+
+**Gate:** a panel reopened mid-slide resumes from the painted extent; no panel animates on
+launch. Both hold, and both are asserted headless in `motion/panel.rs`
+(`a_reversal_resumes_from_the_extent_on_screen`, `a_panel_mounts_at_its_own_state`), with
+the axis measured for real in `a_panel_takes_its_extent_along_its_own_axis`.
+
+### P4g — Page and section entrance (0.5d)
+
+**Shipped.** `motion::arrive` is `reveal::enter` with no anchor: the fade half only. Adopted
+on `feature_card` (Files, Git, Usage, Worktrees and the expanded terminal) and on the
+Settings content column (every section, plus search results, Skills and Subagents).
+
+Two decisions are worth recording, because both were tempting to get wrong:
+
+* **Only the content fades, inside a card that is already there.** `page_card` paints the
+  card surface and the page paints `page_canvas` behind its content. Fading the card would
+  flash the wallpaper through the swap; fading the content over the canvas does not.
+* **It does not travel.** `enter` can offset a surface by `Travel::DISTANCE`, and a page
+  that rose 8px would look like it arrived from somewhere — but every page offset is a
+  layout the reader did not ask for, and the card around it never moves. The guard is
+  `an_arrival_fades_without_moving_the_surface`, which measures the same box with and
+  without the entrance.
+
+The name is the *destination* (`page-git`, `settings.appearance`), not the moment, so
+swapping between two pages never reuses the other's finished clock, and typing in Settings
+→ Search — one destination whose content keeps updating — does not re-fade per keystroke.
+
+**Not shipped, deliberately:** the right dock's tab switch (Review ↔ a subagent). It swaps
+between transcripts, and `DESIGN.md` exempts the transcript from every entry animation.
+
+**Gate:** the page measures the same with and without the entrance; Reduce Motion paints it
+opaque on the frame it opens.
 
 ### P4f — Composer send morph (1d)
 

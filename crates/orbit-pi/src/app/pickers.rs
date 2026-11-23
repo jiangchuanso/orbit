@@ -379,6 +379,7 @@ impl OrbitApp {
                 on_manage_models,
                 cx,
             )
+            .with_trigger_top(self.chip_top.clone())
         });
         // Focus the popup's filter input so typing filters immediately.
         window.focus(&selector.read(cx).focus_handle(cx));

@@ -36,8 +36,10 @@
 use gpui::{
     div, linear_color_stop, linear_gradient, point, prelude::*, px, AnyElement, App, Context,
     ElementId, Entity, FocusHandle, Focusable, FontWeight, IntoElement, MouseButton,
-    MouseDownEvent, ParentElement, Render, ScrollHandle, SharedString, Styled, Window,
+    MouseDownEvent, ParentElement, Pixels, Render, ScrollHandle, SharedString, Styled, Window,
 };
+use std::cell::Cell;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::ui::chip::{ChipButton, ChipStyle};
@@ -49,7 +51,7 @@ use crate::model_selector_match::is_model_selected;
 use crate::providers::provider_display_name;
 use crate::recent_models::Recents;
 use crate::theme::tokens::{
-    context_menu, list, picker, BufferLineHeight, ButtonSize, DynamicSpacing, IconSize,
+    context_menu, list, picker, popover, ButtonSize, DynamicSpacing, IconSize,
     TextSize,
 };
 use crate::theme::{self, Theme};
@@ -70,6 +72,9 @@ const MODEL_POPOVER_W: f32 = 400.;
 const THINKING_POPOVER_W: f32 = 300.;
 /// Option rows visible before the list scrolls.
 const VISIBLE_ROWS: f32 = 6.;
+/// The shortest the popup gets when the room above its chip is cramped, in
+/// option rows: enough for the search, the footer and a couple of rows.
+const MIN_POPUP_ROWS: f32 = 4.;
 /// How far the scope rail travels before its edge shadow is at full strength.
 const RAIL_SHADOW_FADE: f32 = 28.;
 
@@ -214,6 +219,10 @@ pub struct ModelSelector {
     /// owner can suppress the trigger chip's click-through.
     on_dismiss: SelectorDismiss,
     on_manage_models: ManageModels,
+    /// The trigger chip's top edge in window coordinates, recorded by the
+    /// composer as it lays out. It caps the popup's height so the popup opens
+    /// wholly above the chip (see [`popup_max_h`]).
+    trigger_top: Rc<Cell<Option<Pixels>>>,
 }
 
 impl ModelSelector {
@@ -295,7 +304,14 @@ impl ModelSelector {
             on_select_level,
             on_dismiss,
             on_manage_models,
+            trigger_top: Rc::new(Cell::new(None)),
         }
+    }
+
+    /// Share the trigger's recorded top edge, so the popup fits above it.
+    pub(crate) fn with_trigger_top(mut self, top: Rc<Cell<Option<Pixels>>>) -> Self {
+        self.trigger_top = top;
+        self
     }
 
     fn resolve_selected_catalog_ix(
@@ -798,7 +814,15 @@ impl ModelSelector {
             return;
         }
         let content_h = Self::content_height(rows, metrics);
-        let viewport_h = content_h.min(metrics.list_max_h());
+        // The list paints shorter than its six-row cap when the popup is
+        // capped to the room above its chip, so prefer the height it painted
+        // at; before its first paint the handle has no bounds yet.
+        let painted_h = f32::from(list_scroll.bounds().size.height);
+        let viewport_h = if painted_h > 0. {
+            content_h.min(metrics.list_max_h()).min(painted_h)
+        } else {
+            content_h.min(metrics.list_max_h())
+        };
         let row_top = Self::row_top(rows, ix, metrics);
         let row_h = rows[ix].height(metrics);
         let max_offset = (content_h - viewport_h).max(0.);
@@ -1080,6 +1104,9 @@ impl Render for ModelSelector {
             .debug_selector(|| "picker-list".to_string())
             .w_full()
             .max_h(px(metrics.list_max_h()))
+            // The one part that gives way when the popup is capped to the
+            // room above its chip: it scrolls, the chrome around it does not.
+            .min_h_0()
             .overflow_y_scroll()
             .track_scroll(&self.list_scroll)
             .py(picker::list_padding_y(&theme))
@@ -1110,9 +1137,14 @@ impl Render for ModelSelector {
             .detach();
         }
 
+        let max_h = popup_max_h(
+            self.trigger_top.get(),
+            px(metrics.row_h * MIN_POPUP_ROWS),
+        );
         picker_surface(div(), &theme)
             .debug_selector(|| "picker-surface".to_string())
             .w(px(width))
+            .when_some(max_h, |surface, max_h| surface.max_h(max_h))
             .flex()
             .flex_col()
             .overflow_hidden()
@@ -1133,7 +1165,8 @@ impl Render for ModelSelector {
             // search field — grouped above the list with a divider
             .child(
                 search_field(self.filter.clone(), &theme)
-                    .debug_selector(|| "picker-search".to_string()),
+                    .debug_selector(|| "picker-search".to_string())
+                    .flex_none(),
             )
             // The model picker's modes — quiet tabs, not a provider rail; a
             // fresh install with no recents or favorites has nothing to switch
@@ -1141,7 +1174,8 @@ impl Render for ModelSelector {
             .children(
                 (self.kind == PickerKind::Model)
                     .then(|| self.scope_row(theme, cx))
-                    .flatten(),
+                    .flatten()
+                    .map(|row| div().flex_none().child(row)),
             )
             .child(if rows.is_empty() {
                 picker_empty_state(self.kind, theme).into_any_element()
@@ -1154,8 +1188,9 @@ impl Render for ModelSelector {
             // settings — visible under an empty result too, where the user is
             // most likely stuck.
             .child(match self.kind {
-                PickerKind::Thinking => footer(count_label, theme).into_any_element(),
+                PickerKind::Thinking => footer(count_label, theme).flex_none().into_any_element(),
                 PickerKind::Model => footer_shell(count_label, theme)
+                    .flex_none()
                     .child(manage_models_button(
                         cx.listener(|selector, _, window, cx| selector.manage_models(window, cx)),
                         theme,
@@ -1169,6 +1204,18 @@ impl Render for ModelSelector {
 /// `assets/icons/`). Mapping: idea-01 (off/none), idea (low/minimal), brain
 /// (medium), brain-02 (high), ai-brain-02 (xhigh/ultra), ai-brain-03 (max),
 /// sparkles (auto). Unknown levels fall back to the plain spark.
+/// The tallest the popup may be: the room between its trigger's top edge and
+/// the window's, less the menu's gap and the window margin.
+///
+/// gpui's `anchored` snaps a menu that does not fit back *into* the window, so
+/// an uncapped popup taller than that room slid down over its own chip, and the
+/// click meant to close it landed on the popup instead. `None` until the chip
+/// has laid out once. Never below `floor`: a cramped window still shows a
+/// couple of rows, and the snap covers that extreme.
+fn popup_max_h(trigger_top: Option<Pixels>, floor: Pixels) -> Option<Pixels> {
+    trigger_top.map(|top| (top - popover::MENU_OFFSET - popover::WINDOW_MARGIN).max(floor))
+}
+
 pub(crate) fn thinking_icon(level: &str, theme: &Theme) -> (&'static str, gpui::Hsla) {
     match level.to_ascii_lowercase().as_str() {
         "off" | "none" => ("icons/thinking-none.svg", theme.text_muted),
@@ -1501,9 +1548,9 @@ fn label_column<P: IntoElement, S: IntoElement>(
     secondary_mono: bool,
     theme: Theme,
 ) -> impl IntoElement + use<P, S> {
-    // Fixed Comfortable line boxes: the two lines are exactly what
+    // Fixed stacked line boxes: the two lines are exactly what
     // `picker::two_line_entry_height` (the row height) measures.
-    let line_box = |size: TextSize| BufferLineHeight::Comfortable.resolve(size.px(&theme));
+    let line_box = |size: TextSize| picker::stack_line_height(size, &theme);
     let secondary_text = div()
         .w_full()
         .truncate()
@@ -2758,6 +2805,20 @@ mod tests {
             window.focus(&selector.read(cx).focus_handle(cx));
             selector
         })
+    }
+
+    /// The popup fits the room above its chip, less the menu gap and the
+    /// window margin; it never shrinks below its floor, and an unmeasured chip
+    /// leaves it uncapped.
+    #[test]
+    fn the_popup_is_capped_to_the_room_above_its_chip() {
+        let floor = px(200.);
+        assert_eq!(popup_max_h(None, floor), None);
+        assert_eq!(
+            popup_max_h(Some(px(400.)), floor),
+            Some(px(400.) - popover::MENU_OFFSET - popover::WINDOW_MARGIN)
+        );
+        assert_eq!(popup_max_h(Some(px(120.)), floor), Some(floor));
     }
 
     /// The popover's authored size and rhythm: each picker keeps its fixed

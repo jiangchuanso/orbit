@@ -146,9 +146,11 @@ fn scanlines(s: &Source, light: bool, intensity: f32, scale: f32) -> Vec<u8> {
     out
 }
 
-fn ascii(s: &Source, light: bool, intensity: f32, scale: f32) -> Vec<u8> {
-    // Five-column bitmap glyphs, one column/row of spacing at scale 1.
-    const GLYPHS: [[u8; 7]; 10] = [
+/// The ASCII ramp as five-column, seven-row bitmaps, sparsest first: the bits
+/// of each row from the left, `1 << 4` the first column. Shared with the
+/// animated field (`backdrop`), so the moving overlay prints the same glyphs
+/// as the still picture.
+pub(crate) const ASCII_GLYPHS: [[u8; 7]; 10] = [
         [0, 0, 0, 0, 0, 0, 0],
         [0, 0, 0, 0, 0, 4, 0],
         [0, 4, 0, 0, 4, 0, 0],
@@ -159,7 +161,10 @@ fn ascii(s: &Source, light: bool, intensity: f32, scale: f32) -> Vec<u8> {
         [10, 10, 31, 10, 31, 10, 10],
         [17, 2, 4, 4, 8, 16, 17],
         [14, 17, 23, 21, 23, 16, 14],
-    ];
+];
+
+fn ascii(s: &Source, light: bool, intensity: f32, scale: f32) -> Vec<u8> {
+    const GLYPHS: [[u8; 7]; 10] = ASCII_GLYPHS;
     let cell_w = ((6.0 * scale).round() as u32).max(3);
     let cell_h = ((8.0 * scale).round() as u32).max(3);
     let inner_w = cell_w.saturating_sub(1).max(1);

@@ -1,5 +1,6 @@
 //! Ordered-dither backdrop for the new-task page. A configured wallpaper takes
-//! precedence; the caller owns visibility and motion clocks.
+//! precedence (and carries this field itself when it is dithered); the caller
+//! owns visibility and motion clocks.
 //!
 //! The page has one colour rule: the plane is the theme's own `background`, and
 //! the accent lives in the dots and nowhere else. So the screen is a halftone,
@@ -15,6 +16,11 @@
 //! The app monogram is screened into the same field from the embedded mark PNG,
 //! so the watermark cannot drift from the icon, and a band of light crosses its
 //! glyphs every twenty seconds.
+//!
+//! [`overlay`] paints the same field on a clear plane over a wallpaper whose
+//! artwork effect is on, so the treated picture moves the way this page does.
+//! The tone is shared; the last step prints it through the effect's own
+//! [`Screen`]: dither, halftone dots, ASCII glyphs or fixed scanlines.
 
 use std::sync::Arc;
 
@@ -24,6 +30,7 @@ use gpui::{
 use image::{Frame, RgbaImage};
 
 use crate::theme::Theme;
+use crate::wallpaper_fx::ASCII_GLYPHS;
 
 /// The ordered threshold matrix: an ordered Bayer 32×32, built from the 2×2
 /// kernel by the standard doubling (`M₂ₙ = [[4M, 4M+2], [4M+3, 4M+1]]`), so every
@@ -67,22 +74,26 @@ const fn bayer32() -> [[u16; 32]; 32] {
 }
 
 // A logical-pixel screen caps CPU work and atlas size on high-DPI displays.
-// Update at 30 Hz, driven by the backdrop's own animation loop rather than by
-// the RPC heartbeat.
+// The field updates at 10 Hz, driven by its own clock rather than by the RPC
+// heartbeat, which must keep its own cadence for draining pi's stdout.
 //
-// The heartbeat idles at ~90 ms because that is how often the app must drain
-// pi's stdout; a field drawn on that beat could only ever reach ~11 Hz, which
-// is too few steps to animate a one-bit screen — at that rate each step turns
-// over several per cent of the plane and the grain boils instead of flowing.
-// The field's clock is therefore separate and page-scoped: it notifies, it
-// never drains events, and it costs nothing while no new-task page is on
-// screen (`advance_backdrop` short-circuits).
-//
-// 30 Hz is the measured ceiling, not a preference: a full-window raster is
-// ~5.6 ms at 1440×900, so a frame interval of 33 ms keeps the raster off the
-// critical path with room to spare. Matching the reference dither's 60 Hz would
-// need a GPU fragment shader, and gpui 0.2.2 exposes no API to paint one.
-const FPS: f32 = 30.;
+// 10 Hz is the lightweight choice, and it is measured, not guessed. The field
+// drifts slowly, so at 30 Hz consecutive frames differed in only 0.01–0.03 % of
+// their pixels (a few hundred of 1.3 million at 1440×900) — yet each of those
+// frames cost a full raster, a texture upload, and a repaint of the whole
+// window, including every frosted pane's backdrop blur. At 10 Hz a frame still
+// turns over well under a tenth of a per cent of the plane, so the grain still
+// flows, the light still glides across the monogram (a few pixels a step under
+// a band hundreds wide), and the CPU, upload and GPU repaint cost is a third of
+// what it was. The clock also stops whenever the window is in the background
+// (`OrbitApp::tick_backdrop`), so a field nobody is looking at costs nothing.
+const FPS: f32 = 10.;
+
+/// The wall-clock time between two field frames: how long the field's clock
+/// sleeps between beats while it is moving.
+pub fn frame_interval() -> std::time::Duration {
+    std::time::Duration::from_millis((1000. / FPS).round() as u64)
+}
 /// Tonal lattice, in raster pixels. The field is sampled on this coarse grid and
 /// interpolated per pixel; one noise lookup per lattice cell, not per pixel, is
 /// what makes a one-bit screen affordable on the CPU (measured at 1440×900:
@@ -96,6 +107,14 @@ const THRESHOLD_TILE: u32 = 2;
 /// mean accent across the page stays where the dot screen left it, and a lit
 /// pixel is still nowhere near the accent's own alpha.
 const FIELD_INK: f32 = 0.13;
+/// Alpha of a lit pixel when the field is laid over a dithered wallpaper
+/// ([`overlay`]) instead of the palette canvas. There it sits on a picture
+/// rather than a flat plane, so it needs more ink than [`FIELD_INK`] to read as
+/// grain; the wallpaper layer's own image opacity and the page's tint above it
+/// still quiet it, exactly as they quiet the picture.
+const OVERLAY_INK: f32 = 0.35;
+/// The plane of a see-through field: an unlit pixel paints nothing.
+const CLEAR: [u8; 4] = [0, 0, 0, 0];
 /// The field's resting density, before the noise swings it and the mark takes
 /// over. With [`SWING`] it spans roughly 0.16–0.50, and the screen reads it as
 /// the share of the plane that lights: a third of the page carries grain, the
@@ -124,7 +143,27 @@ const MARK_MIN_W: f32 = 200.;
 const MARK_CY: f32 = 0.74;
 const MASK_COLS: u32 = 64;
 
-type Key = (u32, u32, i64, [u8; 4], [u8; 4]);
+/// How a field turns its density into lit pixels. The tone (noise, monogram,
+/// light) is the same for every screen; only this last step differs, so each
+/// wallpaper effect moves in its own idiom.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Screen {
+    /// One-bit ordered dither through the 32×32 Bayer matrix.
+    Dither,
+    /// Round dots on a square grid; a dot's area is its cell's density.
+    Halftone,
+    /// The ASCII ramp, one glyph per cell, chosen by density.
+    Ascii,
+    /// Fixed horizontal lines; a line's thickness is its density, so the lines
+    /// swell and thin as the field drifts while staying put.
+    Scanlines,
+}
+
+/// A screen at a cell-size multiplier (the wallpaper effect's pixel size),
+/// in tenths so it can key the raster cache.
+type Look = (Screen, u16);
+type Key = (u32, u32, i64, [u8; 4], [u8; 4], Look);
+const DITHER_LOOK: Look = (Screen::Dither, 10);
 #[derive(Default)]
 struct Cache {
     image: Option<(Key, Arc<RenderImage>)>,
@@ -167,7 +206,7 @@ fn frame_plan(key: Key, cached: Option<Key>, laid_out: (u32, u32), pending: bool
     let settled = laid_out == (key.0, key.1);
     FramePlan {
         request: !pending && cached.is_none_or(|old| old != key) && (settled || cached.is_none()),
-        paint: cached.is_some_and(|old| old.3 == key.3 && old.4 == key.4),
+        paint: cached.is_some_and(|old| old.3 == key.3 && old.4 == key.4 && old.5 == key.5),
     }
 }
 
@@ -188,7 +227,7 @@ fn ahead(
     pending: bool,
     live: bool,
 ) -> Option<Key> {
-    let following = (key.0, key.1, key.2 + 1, key.3, key.4);
+    let following = (key.0, key.1, key.2 + 1, key.3, key.4, key.5);
     (live && !pending && cached == Some(key) && next != Some(following)).then_some(following)
 }
 
@@ -207,8 +246,42 @@ fn color(value: gpui::Hsla) -> [u8; 4] {
 pub fn layer(theme: Theme, phase: f32, live: bool) -> impl IntoElement + use<> {
     // The plane is the palette's own canvas: the backdrop never paints a wash
     // over it. The accent is only the dots' ink.
-    let background = color(theme.background);
-    let ink = color(theme.accent);
+    field_layer(
+        color(theme.background),
+        color(theme.accent),
+        DITHER_LOOK,
+        phase,
+        live,
+        "dither-cache",
+    )
+}
+
+/// The same field laid over a wallpaper whose artwork effect is on: the grain,
+/// the monogram and the light crossing it, printed through `screen` (the
+/// effect's own idiom) at the effect's pixel size `scale`, on a clear plane so
+/// the treated picture shows between the lit pixels. Same clock, same cadence
+/// and the same raster-ahead cache as the new-task page's [`layer`].
+pub fn overlay(
+    theme: Theme,
+    screen: Screen,
+    scale: f32,
+    phase: f32,
+    live: bool,
+) -> impl IntoElement + use<> {
+    let [b, g, r, _] = color(theme.accent);
+    let ink = [b, g, r, (OVERLAY_INK * 255.).round() as u8];
+    let tenths = (scale.clamp(0.5, 4.) * 10.).round() as u16;
+    field_layer(CLEAR, ink, (screen, tenths), phase, live, "wallpaper-dither-cache")
+}
+
+fn field_layer(
+    background: [u8; 4],
+    ink: [u8; 4],
+    look: Look,
+    phase: f32,
+    live: bool,
+    cache_id: &'static str,
+) -> impl IntoElement + use<> {
     div()
         .absolute()
         .top_0()
@@ -221,9 +294,9 @@ pub fn layer(theme: Theme, phase: f32, live: bool) -> impl IntoElement + use<> {
                     let width = (f32::from(bounds.size.width).ceil() as u32).clamp(1, MAX_SIDE);
                     let height = (f32::from(bounds.size.height).ceil() as u32).clamp(1, MAX_SIDE);
                     let tick = frame(phase);
-                    let key = (width, height, tick, background, ink);
+                    let key = (width, height, tick, background, ink, look);
                     // State belongs to this element in this window, not to the UI thread.
-                    let cache = window.use_keyed_state("dither-cache", cx, |window, cx| {
+                    let cache = window.use_keyed_state(cache_id, cx, |window, cx| {
                         cx.on_release_in(window, |cache: &mut Cache, window, _| {
                             for (_, image) in [cache.image.take(), cache.next.take()]
                                 .into_iter()
@@ -256,7 +329,7 @@ pub fn layer(theme: Theme, phase: f32, live: bool) -> impl IntoElement + use<> {
                             // colours: raster it now and repaint when it lands.
                             cache.pending = true;
                             let task = cx.background_spawn(async move {
-                                raster(width, height, tick as f32 / FPS, background, ink)
+                                raster_look(width, height, tick as f32 / FPS, background, ink, look)
                             });
                             cx.spawn_in(window, async move |weak, cx| {
                                 let pixels = task.await;
@@ -283,7 +356,14 @@ pub fn layer(theme: Theme, phase: f32, live: bool) -> impl IntoElement + use<> {
                             // the heartbeat reaches its frame and repaints.
                             cache.pending = true;
                             let task = cx.background_spawn(async move {
-                                raster(width, height, following.2 as f32 / FPS, background, ink)
+                                raster_look(
+                                    width,
+                                    height,
+                                    following.2 as f32 / FPS,
+                                    background,
+                                    ink,
+                                    look,
+                                )
                             });
                             cx.spawn_in(window, async move |weak, cx| {
                                 let pixels = task.await;
@@ -536,7 +616,32 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
 /// and reads as coarse no matter how often it is redrawn. Thresholding one pixel
 /// at a time gives the screen 1024 tone steps through the 32×32 matrix, which is
 /// what lets the grain resolve into a flow.
+///
+/// This is the page field's screen; [`raster_look`] prints the same tone
+/// through the other wallpaper screens. Only tests call it by this name.
+#[cfg(test)]
 fn raster(width: u32, height: u32, phase: f32, bg: [u8; 4], ink: [u8; 4]) -> RgbaImage {
+    raster_look(width, height, phase, bg, ink, DITHER_LOOK)
+}
+
+/// Pixels per halftone cell, ASCII cell and scanline period at pixel size 1.
+/// They match the still effects in `wallpaper_fx` (a 4 px halftone cell, a
+/// 6×8 glyph cell, a 3 px line period) one step coarser, because a moving
+/// screen at the still one's finest pitch shimmers instead of flowing.
+const HALFTONE_CELL: f32 = 6.;
+const ASCII_CELL: (f32, f32) = (6., 8.);
+const SCAN_PERIOD: f32 = 4.;
+
+/// [`raster`] through any [`Screen`] at a cell-size multiplier.
+fn raster_look(
+    width: u32,
+    height: u32,
+    phase: f32,
+    bg: [u8; 4],
+    ink: [u8; 4],
+    (screen, tenths): Look,
+) -> RgbaImage {
+    let size = f32::from(tenths) / 10.;
     let (w, h) = (width as usize, height as usize);
     let step = TONE_STEP as usize;
     let cols = w.div_ceil(step) + 2;
@@ -560,38 +665,88 @@ fn raster(width: u32, height: u32, phase: f32, bg: [u8; 4], ink: [u8; 4]) -> Rgb
 
     // The one lit colour: the accent carried at [`FIELD_INK`] over the canvas.
     // Every lit pixel is this same value — a dither changes how much of the
-    // screen is lit, never how strong the ink is.
-    let lit: [u8; 3] = std::array::from_fn(|channel| {
-        let plane = f32::from(bg[channel]);
-        let accent = f32::from(ink[channel]);
-        (plane * (1. - FIELD_INK) + accent * FIELD_INK).round() as u8
-    });
+    // screen is lit, never how strong the ink is. Over a clear plane (the
+    // wallpaper overlay) the lit pixel is the ink itself, alpha and all, and
+    // the picture beneath does the blending.
+    let lit: [u8; 4] = if bg[3] == 0 {
+        ink
+    } else {
+        let [b, g, r] = std::array::from_fn(|channel| {
+            let plane = f32::from(bg[channel]);
+            let accent = f32::from(ink[channel]);
+            (plane * (1. - FIELD_INK) + accent * FIELD_INK).round() as u8
+        });
+        [b, g, r, 255]
+    };
 
     let mut pixels = vec![0u8; w * h * 4];
     let inv_step = 1. / step as f32;
-    for y in 0..h {
+    // Bilinear read of the tone lattice at raster pixel `(x, y)`.
+    let tone_at = |x: usize, y: usize| {
+        let (x, y) = (x.min(w - 1), y.min(h - 1));
         let row = (y / step) * cols;
+        let col = x / step;
         let fy = ((y % step) as f32 + 0.5) * inv_step;
+        let fx = ((x % step) as f32 + 0.5) * inv_step;
+        let (left, right) = (tone[row + col], tone[row + col + 1]);
+        let (below_left, below_right) = (tone[row + cols + col], tone[row + cols + col + 1]);
+        let upper = left + (right - left) * fx;
+        let lower = below_left + (below_right - below_left) * fx;
+        upper + (lower - upper) * fy
+    };
+    let bayer = |x: usize, y: usize, tile: u32| {
+        (f32::from(BAYER[(y as u32 / tile) as usize % 32][(x as u32 / tile) as usize % 32])
+            + 0.5)
+            / 1024.
+    };
+    let dither_tile = ((THRESHOLD_TILE as f32 * size).round() as u32).max(1);
+    let dot = (HALFTONE_CELL * size).round().max(2.) as usize;
+    let (glyph_w, glyph_h) = (
+        (ASCII_CELL.0 * size).round().max(3.) as usize,
+        (ASCII_CELL.1 * size).round().max(3.) as usize,
+    );
+    let period = (SCAN_PERIOD * size).round().max(2.);
+    for y in 0..h {
         for x in 0..w {
-            let col = x / step;
-            let fx = ((x % step) as f32 + 0.5) * inv_step;
-            // Bilinear read of the tone lattice.
-            let (left, right) = (tone[row + col], tone[row + col + 1]);
-            let (below_left, below_right) =
-                (tone[row + cols + col], tone[row + cols + col + 1]);
-            let upper = left + (right - left) * fx;
-            let lower = below_left + (below_right - below_left) * fx;
-            let value = upper + (lower - upper) * fy;
-            let threshold = (f32::from(
-                BAYER[(y as u32 / THRESHOLD_TILE) as usize % 32]
-                    [(x as u32 / THRESHOLD_TILE) as usize % 32],
-            ) + 0.5)
-                / 1024.;
-            let pixel = if value > threshold {
-                [lit[0], lit[1], lit[2], 255]
-            } else {
-                bg
+            let on = match screen {
+                // Each pixel against its own ordered threshold.
+                Screen::Dither => tone_at(x, y) > bayer(x, y, dither_tile),
+                // A dot centred in its cell, its area the cell's density, so
+                // the screen keeps the tone a dither would.
+                Screen::Halftone => {
+                    let (cx, cy) = (x / dot * dot + dot / 2, y / dot * dot + dot / 2);
+                    let area = tone_at(cx, cy);
+                    let radius2 = area * (dot * dot) as f32 / std::f32::consts::PI;
+                    let (dx, dy) = (x as f32 - cx as f32 + 0.5, y as f32 - cy as f32 + 0.5);
+                    dx * dx + dy * dy <= radius2
+                }
+                // The cell's glyph from the ramp, picked the way the still
+                // effect picks it (√density), one column and row of spacing.
+                Screen::Ascii => {
+                    let (cx, cy) = (x / glyph_w, y / glyph_h);
+                    let density = tone_at(cx * glyph_w + glyph_w / 2, cy * glyph_h + glyph_h / 2);
+                    let index = ((density.sqrt() * 9.) as usize).min(9);
+                    let (lx, ly) = (x % glyph_w, y % glyph_h);
+                    let (inner_w, inner_h) = (glyph_w - 1, glyph_h - 1);
+                    lx < inner_w && ly < inner_h && {
+                        let gx = (lx * 5 / inner_w).min(4);
+                        let gy = (ly * 7 / inner_h).min(6);
+                        ASCII_GLYPHS[index][gy] & (1 << (4 - gx)) != 0
+                    }
+                }
+                // Lines fixed on the plane, each as thick as the density asks;
+                // a Bayer step along the line dithers the fractional edge so
+                // the thickness is continuous, not four steps. The lines never
+                // move: a whole-plane stripe pattern shifted by a fraction of
+                // a pixel per frame turned over a third of the screen every
+                // frame and strobed. Fixed, only the edges the drifting tone
+                // crosses change, as with every other screen.
+                Screen::Scanlines => {
+                    let within = (y as f32).rem_euclid(period);
+                    within + bayer(x, 0, dither_tile) < tone_at(x, y) * period
+                }
             };
+            let pixel = if on { lit } else { bg };
             pixels[(y * w + x) * 4..][..4].copy_from_slice(&pixel);
         }
     }
@@ -606,7 +761,7 @@ mod tests {
     const INK: [u8; 4] = [255, 255, 255, 255];
 
     fn key(width: u32, height: u32, tick: i64) -> Key {
-        (width, height, tick, BACKGROUND, INK)
+        (width, height, tick, BACKGROUND, INK, DITHER_LOOK)
     }
 
     /// The field used to blank whenever its size changed, because the cached
@@ -614,6 +769,111 @@ mod tests {
     /// the sessions sidebar animates the chat column's width, so every frame of
     /// the slide failed that check and the whole page fell back to a flat slab
     /// until the slide ended — a flash on every show and hide.
+    /// Over a dithered wallpaper the field is see-through: an unlit pixel
+    /// paints nothing, a lit one is exactly the overlay ink (alpha included),
+    /// and the screen still lights part of the plane — never all or none.
+    #[test]
+    fn the_overlay_field_is_clear_between_its_lit_pixels() {
+        let ink = [40, 80, 200, (OVERLAY_INK * 255.).round() as u8];
+        let image = raster(320, 200, 3.0, CLEAR, ink);
+        let (mut lit, mut clear) = (0usize, 0usize);
+        for pixel in image.pixels() {
+            match pixel.0 {
+                p if p == ink => lit += 1,
+                p if p == CLEAR => clear += 1,
+                other => panic!("a pixel is either ink or clear, not {other:?}"),
+            }
+        }
+        assert!(lit > 0 && clear > 0, "lit {lit}, clear {clear}");
+        let share = lit as f32 / (lit + clear) as f32;
+        assert!((0.1..0.7).contains(&share), "a grain, not a wash: {share}");
+
+        // The opaque page field is unchanged: every pixel is opaque.
+        let page = raster(320, 200, 3.0, BACKGROUND, INK);
+        assert!(page.pixels().all(|pixel| pixel.0[3] == 255));
+    }
+
+    /// Every wallpaper screen is a see-through grain of the overlay ink: it
+    /// lights part of the plane (never all or none), moves with the clock, and
+    /// each prints a pattern of its own rather than the dither's.
+    #[test]
+    fn every_screen_is_a_moving_grain_of_its_own() {
+        let ink = [40, 80, 200, 90];
+        let mut patterns = Vec::new();
+        for screen in [Screen::Dither, Screen::Halftone, Screen::Ascii, Screen::Scanlines] {
+            let look = (screen, 10);
+            let image = raster_look(320, 200, 3.0, CLEAR, ink, look);
+            let lit = image.pixels().filter(|pixel| pixel.0 == ink).count();
+            assert!(image.pixels().all(|pixel| pixel.0 == ink || pixel.0 == CLEAR));
+            let share = lit as f32 / (320. * 200.);
+            assert!((0.05..0.8).contains(&share), "{screen:?} lights {share}");
+            assert_ne!(
+                image.as_raw(),
+                raster_look(320, 200, 9.0, CLEAR, ink, look).as_raw(),
+                "{screen:?} moves"
+            );
+            patterns.push(image.into_raw());
+        }
+        for a in 0..patterns.len() {
+            for b in a + 1..patterns.len() {
+                assert_ne!(patterns[a], patterns[b], "screens {a} and {b} differ");
+            }
+        }
+    }
+
+    /// The effect's pixel size reaches the moving screen: a larger size is a
+    /// coarser pattern, and the cache tells the two apart.
+    #[test]
+    fn the_pixel_size_coarsens_the_screen() {
+        let ink = [40, 80, 200, 90];
+        for screen in [Screen::Halftone, Screen::Ascii, Screen::Scanlines, Screen::Dither] {
+            assert_ne!(
+                raster_look(200, 160, 2.0, CLEAR, ink, (screen, 10)).into_raw(),
+                raster_look(200, 160, 2.0, CLEAR, ink, (screen, 30)).into_raw(),
+                "{screen:?}"
+            );
+        }
+        let fine = (64, 64, 1, CLEAR, ink, (Screen::Halftone, 10));
+        let coarse = (64, 64, 1, CLEAR, ink, (Screen::Halftone, 30));
+        assert!(!frame_plan(coarse, Some(fine), (64, 64), false).paint);
+    }
+
+    /// No screen flickers. A field frame may only turn over the edges the
+    /// drifting tone crosses — well under a few per cent of the plane — never a
+    /// pattern that jumps across the whole screen. Scanlines that rolled with
+    /// the clock changed 15–39 % of their pixels every frame and strobed.
+    #[test]
+    fn no_screen_flickers_between_frames() {
+        let ink = [40, 80, 200, 90];
+        let (w, h) = (640u32, 400u32);
+        for screen in [Screen::Dither, Screen::Halftone, Screen::Ascii, Screen::Scanlines] {
+            for size in [10, 25] {
+                for f in 0..4 {
+                    let phase = 3.0 + f as f32 / FPS;
+                    let a = raster_look(w, h, phase, CLEAR, ink, (screen, size));
+                    let b = raster_look(w, h, phase + 1. / FPS, CLEAR, ink, (screen, size));
+                    let changed = a.pixels().zip(b.pixels()).filter(|(x, y)| x != y).count();
+                    let share = changed as f32 / (w * h) as f32;
+                    assert!(
+                        share < 0.03,
+                        "{screen:?} at size {size} turns over {:.2}% per frame",
+                        share * 100.
+                    );
+                }
+            }
+        }
+    }
+
+    /// The overlay moves with the clock, like the page field it copies.
+    #[test]
+    fn the_overlay_field_moves_with_its_phase() {
+        let ink = [40, 80, 200, 90];
+        assert_ne!(
+            raster(160, 120, 0.0, CLEAR, ink).into_raw(),
+            raster(160, 120, 1.0, CLEAR, ink).into_raw()
+        );
+    }
+
     #[test]
     fn a_field_that_outgrew_its_raster_keeps_painting() {
         let plan = frame_plan(
@@ -662,7 +922,7 @@ mod tests {
 
     #[test]
     fn a_stale_theme_blanks_instead_of_painting_the_wrong_colours() {
-        let recoloured = (1410, 878, 3, [255, 0, 0, 255], INK);
+        let recoloured = (1410, 878, 3, [255, 0, 0, 255], INK, DITHER_LOOK);
         assert!(
             !frame_plan(recoloured, Some(key(1410, 878, 3)), (1410, 878), false).paint,
             "an old palette must not stand in for the new one"

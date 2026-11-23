@@ -19,7 +19,7 @@ use std::time::Duration;
 use gpui::{
     div, img, prelude::*, px, AnyElement, App, ClickEvent, Context, Entity, FocusHandle, Focusable,
     Font, FontFeatures, FontStyle, FontWeight, Hsla, Image, ImageFormat, ImageSource,
-    ListAlignment, ListState, ObjectFit, Render, ScrollHandle, StyledText, Subscription, TextRun,
+    ListAlignment, ListState, ObjectFit, Pixels, Render, ScrollHandle, StyledText, Subscription, TextRun,
     Timer, Window,
 };
 
@@ -50,6 +50,37 @@ const BINARY_SNIFF_BYTES: usize = 8_000;
 
 /// Idle beat after the last keystroke before the editor writes to disk.
 const AUTOSAVE_DELAY: Duration = Duration::from_millis(500);
+
+/// The open-file tabs and the strip's close button share this frame.
+const TAB_SIZE: ButtonSize = ButtonSize::Medium;
+
+/// The path toolbar's height at the default UI size (scaled with it).
+const TOOLBAR_H: f32 = 34.;
+
+/// The room around the tabs inside their strip, on every side. Small enough
+/// that the first tab's corner (the button radius) runs nearly concentric
+/// with the card's own rounded corner just outside it. Whole pixels: a scaled
+/// UI makes it fractional, and layout rounding would then split it unevenly
+/// above and below the tab.
+fn strip_inset(theme: &Theme) -> Pixels {
+    DynamicSpacing::Base04.px(theme).round()
+}
+
+/// The tab strip's height: a tab plus [`strip_inset`] above and below, so the
+/// tabs stay centred however large the UI font makes them. Layout boxes are
+/// border-box, so the bottom hairline is added on top rather than taken out
+/// of the bottom inset.
+fn tab_strip_height(theme: &Theme) -> Pixels {
+    TAB_SIZE.height(theme) + strip_inset(theme) * 2. + crate::theme::tokens::BORDER_WIDTH
+}
+
+/// The header's shared content edge, from the card's sides: where a tab's
+/// glyph starts (the strip inset plus the tab's own padding). The path
+/// toolbar under the strip insets its text by the same amount, so the file
+/// name, the path and the trailing controls line up in two columns.
+fn header_content_inset(theme: &Theme) -> Pixels {
+    strip_inset(theme) + TAB_SIZE.padding_x(theme)
+}
 
 /// How a loaded file should be painted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -355,14 +386,6 @@ pub struct FileViewer {
     active: usize,
     loading: bool,
     list: ListState,
-    /// Leading inset the tab strip gives its first tab. The surface spans the
-    /// window when the sessions sidebar is collapsed, so this clears the macOS
-    /// traffic lights and the sidebar/history controls overlaid in the
-    /// titlebar (mirrors the Git/Usage page headers).
-    chrome_leading: f32,
-    /// Reserve the top-right caption-controls inset (Windows only, and only
-    /// while this surface is the window's rightmost column).
-    reserve_controls: bool,
     /// Horizontal scroll of the tab strip, so a long run of open files stays
     /// reachable instead of being clipped off the right edge.
     tab_scroll: ScrollHandle,
@@ -385,8 +408,6 @@ impl FileViewer {
             active: 0,
             loading: false,
             list: ListState::new(0, ListAlignment::Top, px(400.)),
-            chrome_leading: 12.,
-            reserve_controls: false,
             tab_scroll: ScrollHandle::new(),
             focus: cx.focus_handle().tab_stop(true),
             focus_pending: false,
@@ -773,7 +794,7 @@ impl FileViewer {
         // The tabs live in their own horizontally scrollable row: a long run of
         // open files stays reachable (trackpad / shift-wheel) instead of
         // clipping off the right edge. The close button stays pinned outside it.
-        let mut tabs = tab_strip("viewer-tabs", &self.tab_scroll, ButtonSize::Medium, &theme);
+        let mut tabs = tab_strip("viewer-tabs", &self.tab_scroll, TAB_SIZE, &theme);
         for (index, tab) in self.tabs.iter().enumerate() {
             let active = index == self.active;
             let name = tab
@@ -797,7 +818,7 @@ impl FileViewer {
                     gpui::ElementId::Name(format!("viewer-tab-{index}").into()),
                     name,
                 )
-                .size(ButtonSize::Medium)
+                .size(TAB_SIZE)
                 .glyph(glyph)
                 .active(active)
                 .dirty(tab.dirty)
@@ -809,6 +830,7 @@ impl FileViewer {
                     }),
                 )
                 .render(&theme)
+                .debug_selector(move || format!("viewer-tab-{index}"))
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     this.activate(index, cx);
                     // Reveal the tab the user just activated if the strip has
@@ -817,28 +839,30 @@ impl FileViewer {
                 })),
             );
         }
+        // One inset on every side of the tabs: the strip is the tab's own
+        // height plus that inset above and below, so the tab stays centred at
+        // any UI size, and the first tab sits the same distance from the
+        // card's top and leading edges, just inside its rounded corner. The
+        // page sits in a card under the shared top bar, so no titlebar or
+        // caption-button clearance is needed here.
+        let inset = strip_inset(&theme);
         div()
-            .h(px(40.))
+            .debug_selector(|| "viewer-tab-strip".into())
+            .h(tab_strip_height(&theme))
             .flex_none()
             .flex()
             .items_center()
             .gap(DynamicSpacing::Base06.px(&theme))
-            // The surface spans the window when the sidebar is collapsed, so
-            // the leading inset keeps the first tab clear of the macOS traffic
-            // lights and the overlaid titlebar controls; the trailing inset
-            // clears the app's own caption buttons where it draws them.
-            .pl(px(self.chrome_leading))
-            .pr(px(if self.reserve_controls {
-                crate::platform::WINDOW_CONTROLS_W
-            } else {
-                f32::from(DynamicSpacing::Base16.px(&theme))
-            }))
+            .px(inset)
             .border_b_1()
             .border_color(theme.hairline())
             .child(tabs.flex_1().min_w_0())
             .child(
+                // The tab's height, so the row's two controls share one top
+                // and bottom edge and the ✕ lines up with the toolbar's
+                // trailing badge below.
                 IconButton::new("viewer-close", "icons/x.svg")
-                    .size(ButtonSize::Default)
+                    .size(TAB_SIZE)
                     .ink(theme.text_muted)
                     .tip(tr!("common.close"))
                     .on_click(
@@ -857,18 +881,22 @@ impl FileViewer {
     }
 
     fn toolbar(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
+        let height = theme.ui_px(TOOLBAR_H);
         let Some(tab) = self.tabs.get(self.active) else {
-            return div().h(px(34.)).flex_none().into_any_element();
+            return div().h(height).flex_none().into_any_element();
         };
         let Some(content) = tab.content.as_ref() else {
-            return div().h(px(34.)).flex_none().into_any_element();
+            return div().h(height).flex_none().into_any_element();
         };
         let size = format_bytes(content.bytes);
         let lines = tr!("explorer.lines", count = content.line_count());
         div()
-            .h(px(34.))
+            .debug_selector(|| "viewer-toolbar".into())
+            .h(height)
             .flex_none()
-            .px(DynamicSpacing::Base16.px(&theme))
+            // The path starts on the tab label's leading edge above it, and
+            // the trailing badge ends where the strip's ✕ glyph does.
+            .px(header_content_inset(&theme))
             .flex()
             .items_center()
             .gap(DynamicSpacing::Base12.px(&theme))
@@ -1540,5 +1568,54 @@ mod tests {
             max > px(0.),
             "the strip must scroll when 12 tabs overflow a 420px window, max offset {max:?}"
         );
+    }
+
+    /// The tab sits centred in its strip with the same inset from the top and
+    /// the leading edge, at the default and at a large UI size, and the path
+    /// toolbar starts its text on the tab's content edge. The strip used to be
+    /// a fixed 40px while the tab grew with the UI font, so a large UI left the
+    /// tab pressed against the hairline under it.
+    #[gpui::test]
+    fn the_tab_is_centred_and_aligned_at_every_ui_size(cx: &mut gpui::TestAppContext) {
+        use crate::theme::ThemeId;
+        use gpui::{point, size};
+
+        for font_size in [14., 20.] {
+            let mut theme = Theme::for_id(ThemeId::Orbit);
+            theme.ui.ui_font_size = font_size;
+            cx.update(|app| app.set_global(theme));
+            let cx = cx.add_empty_window();
+            let viewer = cx.new(|cx| FileViewer::new(Rc::new(|_| {}), cx));
+            viewer.update(cx, |viewer, cx| {
+                viewer.show(
+                    PathBuf::from("/tmp/orbit-viewer-centred.md"),
+                    "CHANGELOG.md".into(),
+                    cx,
+                );
+            });
+            let _ = cx.draw(point(px(0.), px(0.)), size(px(800.), px(600.)), |_, _| {
+                viewer.clone()
+            });
+            let strip = cx.debug_bounds("viewer-tab-strip").expect("the strip");
+            let tab = cx.debug_bounds("viewer-tab-0").expect("the tab");
+
+            let above = tab.top() - strip.top();
+            let below = strip.bottom() - crate::theme::tokens::BORDER_WIDTH - tab.bottom();
+            let leading = tab.left() - strip.left();
+            assert!(
+                (above - below).abs() < px(0.5),
+                "{font_size}px UI: the tab is centred ({above:?} above, {below:?} below)"
+            );
+            assert!(
+                (above - leading).abs() < px(0.5),
+                "{font_size}px UI: one inset above and before the tab ({above:?} vs {leading:?})"
+            );
+            assert_eq!(tab.size.height, TAB_SIZE.height(&theme), "{font_size}px UI");
+            assert_eq!(
+                leading + TAB_SIZE.padding_x(&theme),
+                header_content_inset(&theme),
+                "{font_size}px UI: the tab glyph starts on the toolbar's text edge"
+            );
+        }
     }
 }

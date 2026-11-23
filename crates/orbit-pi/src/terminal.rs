@@ -1713,6 +1713,13 @@ impl TerminalPanel {
         self.open
     }
 
+    /// The docked strip's height — the extent its slide travels. Kept after the
+    /// panel closes, so the row it gives back eases from where the reader left
+    /// it rather than from zero.
+    pub fn height(&self) -> Pixels {
+        self.height
+    }
+
     /// How many shells the panel is holding — the palette gates the tab
     /// commands on it.
     pub fn tab_count(&self) -> usize {
@@ -2230,9 +2237,10 @@ impl TerminalPanel {
 
 impl Render for TerminalPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.open {
-            return div().into_any_element();
-        }
+        // No `!self.open` short circuit: the app decides when the strip is in
+        // the tree. While it is closing the row slides shut over 200 ms
+        // (`motion::panel::slide`), and returning nothing here would leave an
+        // empty frame travelling to zero.
         let theme = *theme::get(cx);
         let active = self.active_terminal().cloned();
         // Expanded, the shell is a page — it owns the whole column, so it takes

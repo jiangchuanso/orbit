@@ -17,9 +17,10 @@ const TABS: {
   width?: number;
   height?: number;
   narrow?: boolean;
+  crop?: boolean;
 }[] = [
-  { key: "agent", id: "agent", src: "agent-detail", width: 1200, height: 900 },
-  { key: "sessions", id: "sessions", src: "sessions-detail", width: 500, height: 1150, narrow: true },
+  { key: "agent", id: "agent", src: "agent-detail", width: 1200, height: 900, crop: true },
+  { key: "sessions", id: "sessions", src: "sessions-detail", width: 500, height: 1150, narrow: true, crop: true },
   { key: "newTask", id: "new-task", src: "new-task" },
   { key: "git", id: "git", src: "review" },
   { key: "providers", id: "providers", src: "models" },
@@ -37,7 +38,7 @@ export async function Tour({ locale }: { locale: Locale }) {
   // dictionary rather than asking the translator for a key that may not exist.
   const raw = messagesFor(locale).sections as Record<string, { points?: string[] }>;
 
-  const items: TourItem[] = TABS.map(({ key, id, src, width = 3164, height = 2068, narrow }) => ({
+  const items: TourItem[] = TABS.map(({ key, id, src, width = 3164, height = 2068, narrow, crop }) => ({
     id,
     label: sections(`${key}.label`),
     title: sections(`${key}.title`),
@@ -50,6 +51,7 @@ export async function Tour({ locale }: { locale: Locale }) {
       width,
       height,
       narrow,
+      crop,
     },
   }));
 

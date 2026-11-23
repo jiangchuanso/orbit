@@ -96,7 +96,7 @@ typography:
     fontFamily: ".ZedMono, Lilex, ui-monospace, monospace"
     fontSize: "13px"
     lineHeight: "20px"
-# Radius values are before the user's corner-rounding preference.
+# Radius values are fixed; no user preference changes them.
 rounded:
   sm: "4px"
   md: "6px"
@@ -230,8 +230,8 @@ does today, so this section never describes a surface that has not shipped.
 | Density over air: 28px rows, 13–14px body | `ButtonSize::Medium` 28px, `list_item` rows, `TextSize::Default` | Shipped |
 | Accent and action are separate roles | `accent` marks identity; primary fills read `action`, which a palette may key to the accent | Shipped |
 | Restrained UI type, 400–600 | `TextSize` 11–16 at default settings; a separate monospace family serves code | Shipped |
-| Motion is fast and decelerating | `Motion` roles (`Interaction` / `Layout` / `Travel`) plus `motion::hover` · `control` · `state` · `enter` · `disclosure_chevron` · `switch` | Shipped in §Motion System; the hover fade covers the whole sidebar (rows, workspace headers, group rows, menu entries, every control), the Settings back/search/action controls, the transcript copy button, the changelog link and the caption buttons; every other pane still swaps on one frame |
-| Interactive surfaces share state treatments | `interaction::InteractionState` resolves colours; `motion::hover` fades them | Primitives shipped and press treatments adopted; the sidebar and part of Settings fade their hovers, the rest of the app still swaps on one frame (see §The interaction layer) |
+| Motion is fast and decelerating | `Motion` roles (`Interaction` / `Layout` / `Travel`) plus `motion::hover` · `fade` · `control` · `state` · `enter` · `slide` · `disclosure_chevron` · `switch` | Shipped in §Motion System; the hover fade covers the whole sidebar (rows, workspace headers, group rows, menu entries, every control), the Settings back/search/action controls, the transcript copy button and its three block toggles, the changelog link and the caption buttons; the sessions sidebar and the right dock (Review, a subagent tab, the Explorer, session details) ease their own width, and the bottom terminal strip its own height, through one slide (`motion/panel.rs`); a feature page and a Settings section fade their content in on `Layout` (`motion::arrive`) |
+| Interactive surfaces share state treatments | `interaction::InteractionState` resolves colours; `motion::hover` fades them | Primitives shipped and press treatments adopted; every button and icon button in the app, the Explorer and review tree rows, the header controls, the sidebar rows and part of Settings fade their hovers; leaf surfaces in Git, MCP, Worktrees, Subagents and the pickers still swap on one frame (see §The interaction layer) |
 | Keyboard is a first-class path | Command registry + palette; every chip has a `command()` route | Shipped |
 
 Four things Orbit deliberately does **not** take from Linear:
@@ -429,7 +429,7 @@ names a palette family, not a shape language.
 header chips; `input::RADIUS` for text fields; `panel::RADIUS` for cards, panels,
 popovers, menus, and dialogs; `list_item::RADIUS` for navigation/list rows; and
 `Radius::Small` for badges and checkboxes. The chat composer uses its own fixed
-12px `input::composer_radius`, independent of the rounding preference. Fully round
+12px `input::composer_radius`. Fully round
 `Radius::Full` is reserved for genuinely circular or pill-shaped controls (send/stop
 actions, toggles, avatars, status dots, meters) and is not mixed into the rectangular
 card/field/button family.
@@ -521,7 +521,7 @@ list-board rows (`settings_group`, the MCP server rows).
 
 ## Shapes
 
-Corners are soft but restrained. Before the corner-rounding preference, list
+Corners are soft but restrained and fixed. List
 items and compact button frames use 6px, standard buttons and inputs use 9px,
 panels and popovers use 12px, and modal cards use 16px. The chat composer is fixed at 12px. `full` is
 reserved for circular or pill-shaped elements such as status dots, avatar
@@ -652,6 +652,13 @@ Every component below has **one owner** in `crates/orbit-pi/src/ui/`
   the affordance, with no gradient and no lift shadow. Segmented controls use
   the same `raised` face. Ghost and disabled buttons stay flat too.
 - **Ghost:** no fill until hover (`surface_hover`); used for every icon action in a header.
+- **On glass:** a faced control (Secondary, Outline and Danger buttons, outlined and file
+  chips, segmented groups, raised tiles, text fields) resolves its face through
+  `Theme::control_face` / `control_inset`: the palette step on an opaque surface, and on
+  glass an `overlay` ink face (a recessed one: the face at `overlay_strong` alpha) under
+  its hairline, so the frost shows through. Hover, open and selected are then
+  `hover_wash` / `pressed_wash` / `selected_wash`. Primary, accent and error fills stay
+  solid: they carry an action and their contrast floor.
 - **Disabled:** `overlay` fill with `text_disabled` content; never opacity-faded color.
 
 ### Chips
@@ -677,8 +684,8 @@ Every component below has **one owner** in `crates/orbit-pi/src/ui/`
 - **Style:** 1px hairline, fixed 12px radius on the chat composer
   (`input::composer_radius`), 9px before preferences on inline fields (`input::RADIUS`).
   The composer uses `surface_secondary`, with contrast-adjusted glass when available.
-- **Focus:** other fields step their border to `focus_ring` (1px). The composer keeps
-  its resting hairline when focused; its caret indicates text focus.
+- **Focus:** no field draws a focus ring; every field, the composer included, keeps its
+  resting hairline when focused, and the caret indicates text focus.
 - **Placeholder:** `text_muted` — always a real prompt ("Search sessions…"), never a label.
 - **Tokens:** a leading `/command` and any `@file` mention paint inline in their token
   colors while typing; the caret, selection, and wrapping are unaffected (paint only).
@@ -762,16 +769,16 @@ Do not give two competing actions the same visual weight.
 
 ### Focus
 
-Focus is a first-class state, not a stronger hover state. It is one token, drawn one way.
+**Orbit paints no focus ring** (a product decision). Keyboard focus still moves —
+Tab, arrows, Enter and Space work everywhere they did — but no control, row or
+field draws a ring, a border change or a fill for it.
 
 - Pointer hover fills `surface_hover`.
-- Keyboard focus draws a **1px border in `focus_ring`** (`BORDER_WIDTH`), never a
-  fill and never an outline that changes layout. On a filled control the border sits
-  on the control's own edge; on a row it sits on the row's rounded rect.
-- Focus is never signalled by accent color alone — the ring is its own role, and it is
-  asserted at ≥3:1 against `background` and `surface_elevated` for every palette.
-- Focused selection must remain distinguishable from an unfocused selection: the
-  selected fill stays, the ring is added on top.
+- Controls that used to show a ring keep their 1px edge reserved and transparent
+  (`focus_ring_reserved`), so geometry is identical focused or not.
+- The `focus_ring` palette role remains defined (and contrast-tested) but no component
+  paints it. Reintroducing a ring is a deliberate design change, not a fix.
+- Selection still shows through its own fill (`surface_selected` / `selected_wash`).
 - After dismissing a popover or modal, restore focus to the control that opened it.
 - Opening a contextual panel must not unexpectedly steal focus from the active editor
   or composer.
@@ -803,7 +810,6 @@ the call site. Existing adoption is still in progress:
 | `Hover` | `surface_hover` | role's own | `text_primary` | `text_primary` |
 | `Pressed` | `surface_active` | role's own | `text_primary` | `text_primary` |
 | `Selected` | `surface_selected` | role's own | `selection_fg` | `selection_fg` |
-| `Focused` | none | `focus_ring` | `text_primary` | `text_primary` |
 | `Disabled` | `overlay` | `border_subtle` | `text_disabled` | `text_disabled` |
 
 The Hover, Pressed and Selected fills are read through `Theme::hover_wash()`,
@@ -1179,7 +1185,25 @@ swap states instantly rather than transitioning.
 | Switch | settings toggle (`helpers::switch`) | `Interaction` | the knob travels 18px (the track's inner span) and the track crossfades `surface_elevated` → `accent` | the knob jumps |
 | Menu / popover open | anchored card, context menu | `Interaction` + travel | fade plus an 8px travel out of the anchor edge, as one card; `anchored_popover_at` (a context menu at the pointer) fades only, because it has no edge | the card appears at once |
 | Dialog open | modal card | `Layout` | the card fades in over the scrim; it cannot scale for the reason below | the card appears at once |
+| Page open | Files, Git, Usage, Worktrees, the expanded terminal, a Settings section | `Layout` | only the page's content fades, in place, over the card's own canvas (`motion::arrive`); the card, its gutter and the nav beside it never move | the page is painted opaque at once |
 | Panel open / close | sidebar, side pane, explorer, terminal, Git | `Layout` | the panel's own width; chips on its edge ride the same curve | panels snap |
+
+Shipped for the sessions sidebar, the side pane, the Explorer, session details and the
+bottom terminal strip through `motion::panel::slide`, which keeps a closing panel mounted and
+eases the extent that clips it, so the content is uncovered rather than squeezed. A panel
+that is closed and at rest leaves the tree entirely. `Anchor` picks the axis and the edge
+together — `Left`/`Right` animate a width on a row, `Bottom` a height on a column.
+
+A **page** is not a panel: opening Git, Usage, Files, Worktrees or an expanded terminal
+replaces the whole column, so there is no neighbour to take a width back from. `motion::arrive`
+fades the page's content only, in place, over the card's own canvas — the card, its gutter and
+the Settings nav never move. It does not travel, because the surface it replaced is gone on the
+same frame and gpui cannot cross-fade an element that no longer exists: what arrives is a fade
+in, not a dissolve between two pages. `an_arrival_fades_without_moving_the_surface` holds that
+down.
+
+A **dock tab switch** is deliberately still instant. It swaps between transcripts (Review's
+diff and a delegated child's), and the transcript is exempt from every entry animation.
 | Send morph | composer submit | `Travel` (state) + `Interaction` (hover) | while idle, the disabled square grows into a labelled Send button when a draft becomes sendable and folds back when cleared; width and label share a retargetable transition. While a turn runs, Stop occupies the empty slot and a draft exposes the named send lanes | the end state is drawn immediately |
 | Composer dock | first send from the new-task page | `Travel` | the composer leaves the page's centered column for the session's: the space below it closes, the column widens 800 → 960, the folder row collapses, and the transcript's ink fades in, all on one clock (`new_task::settle`) | the session frame is painted on the frame of the send |
 
@@ -1497,9 +1521,8 @@ The file tree is a navigation instrument.
 - Prefer indentation and whitespace over nested cards.
 - A file open in the viewer uses `surface_selected`; during inline rename the
   row uses `surface_active` for editing. An unselected keyboard-cursor row uses
-  `overlay`, and an unselected, non-cursor row gets hover treatment. When the tree
-  has focus and its cursor is on the open file, a focus ring overlays the selected
-  fill without changing row layout; it is omitted during inline rename.
+  `overlay`, and an unselected, non-cursor row gets hover treatment. No focus ring
+  is drawn on the tree.
 - Git status uses semantic indicators plus text/icon where necessary.
 - Hidden files remain controlled by an explicit setting.
 - Directory expansion should be keyboard accessible.
@@ -1641,7 +1664,7 @@ accounts for:
 
 - default (`Rest`)
 - hover (`Hover`)
-- focus (`Focused` — the 1px `focus_ring` border)
+- focus — not painted: Orbit draws no focus ring
 - active/pressed (`Pressed`)
 - selected (`Selected`)
 - disabled (`Disabled` — non-interactive, not faded)
@@ -1792,9 +1815,8 @@ selection of a family does not guarantee every possible combination is verified.
 ### Geometry reference
 
 Spacing scales with UI font size and the Spacing Density setting; other values
-follow their own tokens. Radii are fixed pixel values plus the corner-rounding
-preference, except `None` and `Full`, which do not change. The radius values
-below are before that preference.
+follow their own tokens. Radii are fixed pixel values; no preference changes
+them.
 
 | Role | Value | Token |
 | -- | -- | -- |
@@ -1810,7 +1832,7 @@ below are before that preference.
 | Type | 11 / 12 / 14 / 16px | `TextSize` |
 | Spacing | 1, 2, 3, 4, 6, 8, 12, 16, 20, 24, 32, 40, 48px | `DynamicSpacing` |
 | Separators | 1px | `BORDER_WIDTH` |
-| Focus ring | 1px border | `BORDER_WIDTH` in `focus_ring` |
+| Focus ring | none painted | the 1px edge stays reserved, transparent |
 | Motion | 150 / 200 / 260ms | `Motion` |
 
 ### Verification

@@ -627,3 +627,69 @@ fn flex_none_keeps_icons_from_collapsing(cx: &mut gpui::TestAppContext) {
         shrunk
     );
 }
+
+/// A window in the background holds the field still: neither the field's own
+/// clock nor the RPC beat advances it, the clock is dropped, and nothing
+/// repaints. Back in front, it resumes from the frame it was showing.
+#[gpui::test]
+fn a_background_window_holds_the_field_still(cx: &mut gpui::TestAppContext) {
+    let app = cx.update(|cx| {
+        cx.set_global(Theme::for_id(ThemeId::Orbit));
+        cx.new(OrbitApp::new)
+    });
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.backdrop_live = true;
+            app.window_active = true;
+            app.backdrop_clock =
+                Some(std::time::Instant::now() - std::time::Duration::from_secs_f32(2.));
+            assert!(app.tick_backdrop(cx), "frontmost: the field moves");
+        })
+    });
+    // Let the app's own startup work settle, so only the field is counted.
+    cx.run_until_parked();
+    let shown = cx.update(|cx| app.read(cx).backdrop_phase);
+    let repaints = std::rc::Rc::new(std::cell::Cell::new(0));
+    let _observer = cx.update(|cx| {
+        let repaints = repaints.clone();
+        cx.observe(&app, move |_, _| repaints.set(repaints.get() + 1))
+    });
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.window_active = false;
+            assert!(!app.tick_backdrop(cx), "in the background it does not move");
+            assert!(app.backdrop_clock.is_none(), "and keeps no clock");
+        })
+    });
+    std::thread::sleep(crate::backdrop::frame_interval() * 2);
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.tick_backdrop(cx);
+            assert_eq!(app.backdrop_phase, shown, "the frame holds");
+        })
+    });
+    cx.run_until_parked();
+    assert_eq!(repaints.get(), 0, "a held field asks for no repaint");
+    // The RPC beat (which repaints for its own reasons) does not move it either.
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.tick(cx);
+            assert_eq!(app.backdrop_phase, shown, "the RPC beat holds it too");
+        })
+    });
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.window_active = true;
+            app.tick_backdrop(cx);
+            assert!(app.backdrop_phase >= shown, "it resumes, never rewinds");
+        })
+    });
+}
+
+/// The field's beat is its frame rate, and that rate is the lightweight one:
+/// a tenth of a second between frames, not the 33 ms it used to spend.
+#[test]
+fn the_field_beats_ten_times_a_second() {
+    assert_eq!(crate::backdrop::frame_interval(), std::time::Duration::from_millis(100));
+    assert_eq!(crate::backdrop::frame(1.), 10);
+}

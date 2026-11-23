@@ -12,13 +12,17 @@ use std::time::{Duration, Instant};
 use unicode_segmentation::UnicodeSegmentation;
 
 use gpui::{
-    div, fill, point, prelude::*, px, relative, size, App, Bounds, ClipboardEntry, ClipboardItem,
-    ContentMask, Context, CursorStyle, Element, ElementInputHandler, Entity, EntityInputHandler,
-    FocusHandle, Focusable, GlobalElementId, Image, InspectorElementId, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, ScrollWheelEvent,
-    SharedString, Style, Task, TextAlign, TextRun, Timer, UTF16Selection, Window, WrappedLine,
+    div, fill, point, prelude::*, px, relative, size, AnyElement, App, Bounds, ClipboardEntry,
+    ClipboardItem, ContentMask, Context, CursorStyle, Element, ElementInputHandler, Entity,
+    EntityInputHandler, FocusHandle, Focusable, GlobalElementId, Image, InspectorElementId,
+    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels,
+    ScrollWheelEvent, SharedString, Style, Task, TextAlign, TextRun, Timer, UTF16Selection,
+    UnderlineStyle, Window, WrappedLine,
 };
 
+use crate::ui::menu::{context_menu_entry, context_menu_separator, context_menu_surface};
+use crate::ui::popover::{anchored_popover_at, PopoverExt};
+use crate::ui::style::control::ControlExt;
 use crate::{
     highlight::{self, Lang},
     mentions::{detect_trigger, tokenize_mentions, MentionKind, SharedAutocomplete, Trigger},
@@ -43,6 +47,11 @@ const UNDO_LIMIT: usize = 128;
 const UNDO_BYTES: usize = 16 * 1024 * 1024;
 /// Edits within this window coalesce into one undo step (a typing run).
 const UNDO_COALESCE: Duration = Duration::from_millis(400);
+
+/// A pause this long ends a typing run, so the spell check runs then instead of
+/// on every keystroke. Long enough to skip mid-word states, short enough that
+/// the squiggle lands while the sentence is still being read.
+const SPELL_CHECK_DELAY: Duration = Duration::from_millis(350);
 
 /// Sent-prompt recall for the composer (`up`/`down` walk it, terminal-style).
 /// The app records every submitted prompt; the composer previews entries,
@@ -256,6 +265,37 @@ pub struct ComposerInput {
     /// Timestamp of the last recorded edit, for coalescing a typing run into
     /// one undo step. `None` after a caret move or undo/redo.
     last_edit: Option<Instant>,
+    /// Underline misspelled words in this field (the chat composer opts in;
+    /// the code editor and form fields do not). The preference gate and the
+    /// platform check both live behind `spellcheck::enabled`.
+    spell_check: bool,
+    /// Misspelled byte ranges from the last check, painted as wavy underlines.
+    /// They can lag the buffer by an edit, so the paint clamps them.
+    spell_ranges: Vec<Range<usize>>,
+    /// The `revision` [`Self::spell_ranges`] were computed for.
+    spell_revision: u64,
+    /// A debounce is already waiting to run the next check.
+    spell_pending: bool,
+    _spell_task: Option<Task<()>>,
+    /// The right-click spelling menu: the word, its replacement candidates and
+    /// where the pointer opened it. `None` while it is closed.
+    spell_menu: Option<SpellMenu>,
+}
+
+/// A misspelled word's context menu.
+struct SpellMenu {
+    /// The word's byte range in the buffer; replacing it edits exactly this.
+    range: Range<usize>,
+    /// The word as it read when the menu opened, so a replacement can verify
+    /// it is still the same text before touching the buffer.
+    word: String,
+    /// What the checker suggests, best first. Empty means "no guesses".
+    guesses: Vec<String>,
+    /// Window-space point the right-click landed on: the menu's top-left.
+    at: gpui::Point<Pixels>,
+    /// The buffer revision the menu was opened at. Any edit closes it: the
+    /// word it was opened on no longer sits where it did.
+    revision: u64,
 }
 
 impl ComposerInput {
@@ -305,6 +345,12 @@ impl ComposerInput {
             redo_stack: Vec::new(),
             undo_bytes: 0,
             last_edit: None,
+            spell_check: false,
+            spell_ranges: Vec::new(),
+            spell_revision: 0,
+            spell_pending: false,
+            _spell_task: None,
+            spell_menu: None,
         }
     }
 
@@ -416,6 +462,17 @@ impl ComposerInput {
 
     pub fn with_max_lines(mut self, max_lines: usize) -> Self {
         self.max_lines = max_lines.max(1);
+        self
+    }
+
+    /// Spell-check this field: misspelled words get a wavy underline once the
+    /// typing pauses. Only the chat composer opts in — the Explorer's editor
+    /// writes code, and a form field holds a name, a key or a path, none of
+    /// which is prose. The Settings preference and the platform support are
+    /// checked separately (`spellcheck::enabled`), so turning the switch off
+    /// reaches an already-built composer.
+    pub fn with_spell_check(mut self, spell_check: bool) -> Self {
+        self.spell_check = spell_check;
         self
     }
 
@@ -539,6 +596,7 @@ impl ComposerInput {
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.reset_prompt_nav();
         self.content.clear();
+        self.forget_spelling();
         self.selected_range = 0..0;
         self.end_composition();
         self.scroll_offset = px(0.);
@@ -552,6 +610,7 @@ impl ComposerInput {
     pub fn set_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
         self.reset_prompt_nav();
         self.content = text.into();
+        self.forget_spelling();
         self.selected_range = self.content.len()..self.content.len();
         self.selection_reversed = false;
         self.end_composition();
@@ -566,6 +625,7 @@ impl ComposerInput {
     pub fn set_text_at_start(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
         self.reset_prompt_nav();
         self.content = text.into();
+        self.forget_spelling();
         self.selected_range = 0..0;
         self.selection_reversed = false;
         self.end_composition();
@@ -642,6 +702,143 @@ impl ComposerInput {
                 this.update(cx, |input, cx| input.blink(epoch, cx)).ok();
             }
         }));
+    }
+
+    // ── spell check ──────────────────────────────────────────────────────
+
+    /// Start a spelling check once typing pauses.
+    ///
+    /// Called from `render`, so every edit path — keys, IME, paste,
+    /// autocomplete, history recall — reaches it through [`Self::revision`]
+    /// instead of each one remembering to check. The check itself is an AppKit
+    /// call on the main thread, so it is debounced out of the keystroke and
+    /// never runs inside a paint pass.
+    fn sync_spell_check(&mut self, cx: &mut Context<Self>) {
+        // Any edit invalidates the word an open menu was opened on.
+        if self
+            .spell_menu
+            .as_ref()
+            .is_some_and(|menu| menu.revision != self.revision)
+        {
+            self.spell_menu = None;
+            cx.notify();
+        }
+        // Off (or unsupported): the paint gate drops the marks, and the last
+        // result is kept — it still describes this text, so switching back on
+        // only needs a fresh check when the draft changed meanwhile.
+        if !self.spell_check || !crate::spellcheck::enabled(cx) {
+            return;
+        }
+        if self.spell_pending || self.revision == self.spell_revision {
+            return;
+        }
+        self.spell_pending = true;
+        self._spell_task = Some(cx.spawn(async move |this, cx| {
+            Timer::after(SPELL_CHECK_DELAY).await;
+            if let Some(this) = this.upgrade() {
+                this.update(cx, |input, cx| input.check_spelling(cx)).ok();
+            }
+        }));
+    }
+
+    /// Check the buffer and repaint only when the marks actually changed — a
+    /// paused composer is already repainting for the caret blink, and an
+    /// unchanged result must not add a frame.
+    fn check_spelling(&mut self, cx: &mut Context<Self>) {
+        self.spell_pending = false;
+        self.spell_revision = self.revision;
+        let ranges = crate::spellcheck::misspelled_ranges(&self.content);
+        if ranges != self.spell_ranges {
+            self.spell_ranges = ranges;
+            cx.notify();
+        }
+    }
+
+    /// Drop the painted marks when the buffer is replaced wholesale: the old
+    /// ranges describe text that is gone, and clamping would only move them.
+    fn forget_spelling(&mut self) {
+        self.spell_ranges.clear();
+        self.spell_menu = None;
+    }
+
+    /// Right-click on a marked word: offer the checker's suggestions at the
+    /// pointer, the way a native text view does.
+    ///
+    /// Only a *marked* word opens the menu. The squiggle is the promise that
+    /// the word was checked; a menu on a word the checker approved would make
+    /// the mark meaningless. Clicking anywhere else does nothing, exactly as
+    /// before.
+    fn on_right_click(
+        &mut self,
+        event: &MouseDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The preference and the platform are not re-checked here: off macOS
+        // `spell_ranges` is always empty, and a field that was never asked to
+        // spell-check has no marks to click.
+        if !self.spell_check {
+            return;
+        }
+        let offset = self.index_for_mouse_position(event.position);
+        let marked = crate::spellcheck::clamp_ranges(&self.content, &self.spell_ranges);
+        let Some(range) = spell_target_at(&self.content, &marked, offset) else {
+            return;
+        };
+        let word = self.content[range.clone()].to_string();
+        let guesses = crate::spellcheck::guesses(&word);
+        self.spell_menu = Some(SpellMenu {
+            range,
+            word,
+            guesses,
+            at: event.position,
+            revision: self.revision,
+        });
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    pub(crate) fn close_spell_menu(&mut self, cx: &mut Context<Self>) {
+        if self.spell_menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Whether the right-click spelling menu is open (Escape's cascade asks).
+    pub(crate) fn is_spell_menu_open(&self) -> bool {
+        self.spell_menu.is_some()
+    }
+
+    /// Replace the marked word with suggestion `index`. One undo step, and the
+    /// next check runs on the following render (the revision moved).
+    ///
+    /// It takes the menu, so a duplicate dispatch cannot apply a second edit at
+    /// a range the first one already moved.
+    fn apply_spell_guess(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(menu) = self.spell_menu.take() else {
+            return;
+        };
+        let Some(guess) = menu.guesses.get(index).cloned() else {
+            return;
+        };
+        // The word has to still be there: an edit between opening the menu and
+        // picking a suggestion closes it on the next frame, and this is the
+        // check that makes a replacement impossible even if that frame never
+        // came.
+        if self.content.get(menu.range.clone()) != Some(menu.word.as_str()) {
+            return;
+        }
+        self.replace_range(menu.range, &guess, cx);
+    }
+
+    /// Add the marked word to the user's dictionary and re-check, so the mark
+    /// it was opened from goes away instead of lingering as a stale squiggle.
+    fn learn_spell_word(&mut self, cx: &mut Context<Self>) {
+        let Some(menu) = self.spell_menu.take() else {
+            return;
+        };
+        crate::spellcheck::learn(&self.content[menu.range]);
+        self.check_spelling(cx);
     }
 
     // ── movement ───────────────────────────────────────────────────────
@@ -729,6 +926,7 @@ impl ComposerInput {
         // paging itself), caret at the end, without touching history's nav.
         self.record_undo();
         self.content = text;
+        self.forget_spelling();
         self.selected_range = self.content.len()..self.content.len();
         self.selection_reversed = false;
         self.end_composition();
@@ -1018,6 +1216,14 @@ impl ComposerInput {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // While the spelling menu is open a press belongs to it: a row handles
+        // its own click, and the popover's outside handler closes the menu.
+        // The caret must not move under a context menu — and moving it here
+        // would repaint between a row's mouse-down and mouse-up, which drops
+        // the row's click entirely.
+        if self.spell_menu.is_some() {
+            return;
+        }
         // Focus on press, like a native field: the arrows and clipboard keys
         // are live before the button is released, and the input does not
         // depend on an ancestor's mouse-up handler to claim focus.
@@ -1755,6 +1961,178 @@ fn line_range_at(text: &str, offset: usize) -> Range<usize> {
     start..end
 }
 
+/// Split `runs` so every misspelled span carries a wavy underline.
+///
+/// An underline is a paint channel only: the total of the runs' `len` is
+/// unchanged, so the shaped layout — and with it the caret, the selection and
+/// the wrap points — is identical to the unmarked text. Ranges are a subset of
+/// the run coverage (`clamp_ranges` guarantees they land on boundaries), and
+/// runs that fall outside every range keep whatever style they were given.
+fn underline_misses(
+    runs: Vec<TextRun>,
+    misspelled: &[Range<usize>],
+    theme: &theme::Theme,
+) -> Vec<TextRun> {
+    let mark = UnderlineStyle {
+        thickness: px(1.),
+        color: Some(theme.error),
+        wavy: true,
+    };
+    let mut out: Vec<TextRun> = Vec::with_capacity(runs.len() + misspelled.len() * 2);
+    let mut offset = 0;
+    for run in runs {
+        let run_end = offset + run.len;
+        let mut cursor = offset;
+        for span in misspelled {
+            let start = span.start.max(offset);
+            let end = span.end.min(run_end);
+            if start >= end {
+                continue;
+            }
+            if start > cursor {
+                out.push(slice_run(&run, start - cursor, false, &mark));
+            }
+            out.push(slice_run(&run, end - start, true, &mark));
+            cursor = end;
+        }
+        if cursor < run_end {
+            out.push(slice_run(&run, run_end - cursor, false, &mark));
+        }
+        offset = run_end;
+    }
+    // `shape_text` must not see a zero-length run.
+    out.retain(|run| run.len > 0);
+    out
+}
+
+/// One slice of `run` of `len` bytes, underlined when `misspelled`.
+fn slice_run(run: &TextRun, len: usize, misspelled: bool, mark: &UnderlineStyle) -> TextRun {
+    let mut out = run.clone();
+    out.len = len;
+    if misspelled {
+        out.underline = Some(*mark);
+    }
+    out
+}
+
+/// The marked word a click at `offset` lands on, if any.///
+/// `ranges` are the misspelled spans (already clamped to `content`). A word
+/// has to sit *inside* one of them — the squiggle is what the menu is about, so
+/// a click on correctly spelled text, punctuation or whitespace opens nothing.
+fn spell_target_at(content: &str, ranges: &[Range<usize>], offset: usize) -> Option<Range<usize>> {
+    if content.is_empty() || ranges.is_empty() {
+        return None;
+    }
+    let word = word_range_at(content, offset.min(content.len()));
+    if word.is_empty() || !content[word.clone()].chars().any(char::is_alphabetic) {
+        return None;
+    }
+    ranges
+        .iter()
+        .any(|range| range.start <= word.start && word.end <= range.end)
+        .then_some(word)
+}
+
+/// The right-click spelling menu: the checker's suggestions, then the row that
+/// adds the word to the user's dictionary.
+///
+/// It is a context menu at the pointer, so it takes the shared menu surface and
+/// entry metrics, no entrance travel (a menu with no anchor edge has none), and
+/// the picker's definite width — never content-sized, so a long suggestion
+/// truncates instead of stretching the popover.
+fn spell_menu_popup(
+    menu: &SpellMenu,
+    this: Entity<ComposerInput>,
+    theme: theme::Theme,
+) -> AnyElement {
+    use crate::theme::tokens::picker;
+
+    let theme = theme.for_floating();
+    let mut rows: Vec<AnyElement> = Vec::with_capacity(menu.guesses.len() + 2);
+    if menu.guesses.is_empty() {
+        // Honest emptiness: the word is marked and the checker has nothing to
+        // offer, which is a real answer rather than a failed lookup.
+        rows.push(
+            context_menu_entry(div(), &theme)
+                .text_color(theme.text_muted)
+                .child(tr!("composer.no_spelling_guesses"))
+                .into_any_element(),
+        );
+    }
+    for (index, guess) in menu.guesses.iter().enumerate() {
+        let label = guess.clone();
+        let pick = this.clone();
+        rows.push(
+            context_menu_entry(
+                div()
+                    .id(gpui::ElementId::Name(
+                        format!("spell-suggestion-{index}").into(),
+                    ))
+                    .debug_selector(move || format!("spell-suggestion-{index}")),
+                &theme,
+            )
+            .cursor_pointer()
+            .hover_state(&theme)
+            // Release, not `on_click`: these rows are deferred children of the
+            // composer, and `on_click`'s press→release pairing does not survive
+            // the frame the press itself triggers — measured, the release lands
+            // but the click never fires.
+            .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                pick.update(cx, |input, cx| input.apply_spell_guess(index, cx))
+            })
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .truncate()
+                    .text_color(theme.text_secondary)
+                    .child(label),
+            )
+            .into_any_element(),
+        );
+    }
+    rows.push(context_menu_separator(&theme).into_any_element());
+    {
+        let this = this.clone();
+        rows.push(
+            context_menu_entry(
+                div()
+                    .id("spell-learn")
+                    .debug_selector(|| "spell-learn".into()),
+                &theme,
+            )
+            .cursor_pointer()
+            .hover_state(&theme)
+            // Release, for the same reason as the suggestion rows.
+            .on_mouse_up(MouseButton::Left, {
+                let this = this.clone();
+                move |_, _, cx| this.update(cx, |input, cx| input.learn_spell_word(cx))
+            })
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .truncate()
+                    .text_color(theme.text_secondary)
+                    .child(tr!("composer.learn_spelling")),
+            )
+            .into_any_element(),
+        );
+    }
+
+    let popup = context_menu_surface(div().id("spell-menu-surface"), &theme)
+        .w(picker::compact_width(&theme))
+        .flex()
+        .flex_col()
+        .dismiss_on_outside({
+            let this = this.clone();
+            move |_, _, cx| this.update(cx, |input, cx| input.close_spell_menu(cx))
+        })
+        .children(rows);
+
+    anchored_popover_at(menu.at, popup, "spell-menu", &theme)
+}
+
 /// Overlay scrollbar thumb height. `Ord::clamp` panics when min > max, so
 /// the 24px minimum is lowered when the track itself is shorter — a
 /// one-line form field is typically ~18px and used to abort if a wrapped
@@ -1999,8 +2377,20 @@ impl Element for TextElement {
             wrap,
             syntax,
             mask_scale,
+            misspelled,
         ) = {
             let input = self.input.read(cx);
+            // Spelling marks only reach a plain prose buffer: a masked field,
+            // a code file and a placeholder are never checked.
+            let misspelled = if input.spell_check
+                && input.syntax.is_none()
+                && !input.masked
+                && crate::spellcheck::enabled(cx)
+            {
+                crate::spellcheck::clamp_ranges(&input.content, &input.spell_ranges)
+            } else {
+                Vec::new()
+            };
             (
                 input.content.clone(),
                 input.selected_range.clone(),
@@ -2013,6 +2403,7 @@ impl Element for TextElement {
                 input.wrap,
                 input.syntax,
                 input.mask_scale(),
+                misspelled,
             )
         };
         let masked = mask_scale > 1;
@@ -2056,7 +2447,7 @@ impl Element for TextElement {
         } else {
             // Token colors belong to mention-capable inputs (the main
             // composer); plain form fields keep one ink.
-            let runs = if self.input.read(cx).autocomplete.is_some() {
+            let mut runs = if self.input.read(cx).autocomplete.is_some() {
                 mention_runs(&content, &base, theme)
             } else {
                 vec![TextRun {
@@ -2064,6 +2455,9 @@ impl Element for TextElement {
                     ..base.clone()
                 }]
             };
+            if !misspelled.is_empty() {
+                runs = underline_misses(runs, &misspelled, theme);
+            }
             (SharedString::from(content.clone()), runs)
         };
 
@@ -2423,6 +2817,9 @@ impl Render for ComposerInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Keep the caret blink in step with focus and this frame's edit.
         self.sync_caret_blink(window, cx);
+        // Schedule the spelling check once typing pauses (debounced; never in
+        // the paint pass).
+        self.sync_spell_check(cx);
         // A composition cannot outlive focus: once another control takes over,
         // the IME has ended the session and gpui 0.2.2 never says so (it never
         // handles `WM_IME_ENDCOMPOSITION`), so the flag would keep claiming
@@ -2467,12 +2864,20 @@ impl Render for ComposerInput {
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::undo))
             .on_action(cx.listener(Self::redo))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_click))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .child(TextElement { input: cx.entity() })
+            .children({
+                let this = cx.entity();
+                let theme = *theme::get(cx);
+                self.spell_menu
+                    .as_ref()
+                    .map(|menu| spell_menu_popup(menu, this, theme))
+            })
     }
 }
 
@@ -2480,9 +2885,10 @@ impl Render for ComposerInput {
 mod tests {
     use super::{
         horizontal_scroll, line_at_offset, line_range_at, mention_runs, normalize_newlines,
-        resolve_placeholder, scrollbar_thumb_height, word_range_at, PromptHistory,
+        resolve_placeholder, scrollbar_thumb_height, spell_target_at, underline_misses,
+        word_range_at, ComposerInput, PromptHistory, SpellMenu,
     };
-    use gpui::{px, SharedString, TextRun};
+    use gpui::{point, px, AppContext as _, MouseButton, SharedString, TextRun};
 
     /// `/command` and `@file` tokens carry a whisper of their own hue behind
     /// them, so each reads as one object rather than loose colored words —
@@ -2520,6 +2926,249 @@ mod tests {
         // Plain prose keeps the base ink and no background.
         assert!(runs[0].background_color.is_none());
         assert_eq!(runs[0].len, "refactor ".len());
+    }
+
+    /// Spelling marks are a paint channel on top of whatever the run builder
+    /// produced: the runs still cover the text byte-for-byte (so the shaped
+    /// layout, the caret and the wrap points do not move), each mark edge is a
+    /// run boundary, and only the marked slice carries the wavy underline.
+    #[test]
+    fn spelling_marks_split_runs_without_moving_text() {
+        use crate::spellcheck::clamp_ranges;
+        use crate::theme::{Theme, ThemeId};
+
+        let theme = Theme::for_id(ThemeId::Orbit);
+        let base = TextRun {
+            len: 0,
+            font: gpui::font("Test"),
+            color: theme.text_primary,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let text = "fix teh bug in @src/main.rs";
+        // The mention tint splits the runs before spelling ever runs.
+        let runs = mention_runs(text, &base, &theme);
+        let misspelled = clamp_ranges(text, std::slice::from_ref(&(4..7)));
+        let marked = underline_misses(runs, &misspelled, &theme);
+
+        assert_eq!(
+            marked.iter().map(|run| run.len).sum::<usize>(),
+            text.len(),
+            "marking must not change the covered length"
+        );
+        let underlined: Vec<_> = marked
+            .iter()
+            .filter(|run| run.underline.is_some())
+            .collect();
+        assert_eq!(underlined.len(), 1, "only the misspelled word is marked");
+        assert_eq!(underlined[0].len, "teh".len());
+        let style = underlined[0].underline.expect("underline");
+        assert!(style.wavy, "a misspelling is a wavy mark, not a rule");
+        assert_eq!(style.color, Some(theme.error));
+
+        // The marked run sits between the two unmarked halves of the word run.
+        let marked_at = marked
+            .iter()
+            .position(|run| run.underline.is_some())
+            .expect("marked run");
+        assert_eq!(marked[marked_at - 1].len, "fix ".len());
+        assert_eq!(marked[marked_at + 1].len, " bug in ".len());
+
+        // Nothing marked means the runs come back untouched.
+        let plain = underline_misses(mention_runs(text, &base, &theme), &[], &theme);
+        assert_eq!(plain.len(), mention_runs(text, &base, &theme).len());
+    }
+
+    /// A right-click only offers suggestions on a word the squiggle already
+    /// marks, so the menu and the mark never disagree.
+    #[test]
+    fn only_a_marked_word_opens_the_spelling_menu() {
+        use crate::spellcheck::clamp_ranges;
+
+        let text = "fix teh bug";
+        let marked = clamp_ranges(text, std::slice::from_ref(&(4..7)));
+        // Inside `teh`.
+        assert_eq!(spell_target_at(text, &marked, 5), Some(4..7));
+        // `fix` and `bug` are spelled correctly: nothing to offer.
+        assert_eq!(spell_target_at(text, &marked, 1), None);
+        assert_eq!(spell_target_at(text, &marked, 9), None);
+        // The space between words is not a word.
+        assert_eq!(spell_target_at(text, &marked, 3), None);
+        // A mark that only covers part of a word does not claim the word.
+        let partial = clamp_ranges(text, std::slice::from_ref(&(4..6)));
+        assert_eq!(spell_target_at(text, &partial, 5), None);
+    }
+
+    /// Choosing a suggestion edits exactly the marked word, in one undo step,
+    /// and drops the menu.
+    #[gpui::test]
+    fn accepting_a_suggestion_replaces_only_the_marked_word(cx: &mut gpui::TestAppContext) {
+        let input = cx.update(|cx| {
+            cx.set_global(crate::theme::Theme::dark());
+            cx.new(|cx| {
+                ComposerInput::new(cx)
+                    .with_text("fix teh bug")
+                    .with_spell_check(true)
+            })
+        });
+        cx.update(|cx| {
+            input.update(cx, |input, cx| {
+                input.spell_ranges = std::slice::from_ref(&(4..7)).to_vec();
+                input.spell_menu = Some(SpellMenu {
+                    range: 4..7,
+                    word: "teh".into(),
+                    guesses: vec!["ten".into(), "the".into()],
+                    at: point(px(4.), px(4.)),
+                    revision: input.revision,
+                });
+                input.apply_spell_guess(1, cx);
+                assert_eq!(input.text(), "fix the bug");
+                assert!(input.spell_menu.is_none(), "the menu closes on choice");
+                assert_eq!(input.selected_range, 7..7, "caret follows the word");
+                // A duplicate dispatch cannot edit twice.
+                input.apply_spell_guess(1, cx);
+                assert_eq!(input.text(), "fix the bug");
+            });
+        });
+    }
+
+    /// An edit between opening the menu and picking a suggestion must not
+    /// replace whatever now sits at the old offsets: the menu closes on the
+    /// next frame, and a stale pick is refused even if that frame never came.
+    #[gpui::test]
+    fn an_edit_invalidates_the_open_spelling_menu(cx: &mut gpui::TestAppContext) {
+        let input = cx.update(|cx| {
+            cx.set_global(crate::theme::Theme::dark());
+            cx.new(|cx| {
+                ComposerInput::new(cx)
+                    .with_text("fix teh bug")
+                    .with_spell_check(true)
+            })
+        });
+        cx.update(|cx| {
+            input.update(cx, |input, cx| {
+                input.spell_ranges = std::slice::from_ref(&(4..7)).to_vec();
+                input.spell_menu = Some(SpellMenu {
+                    range: 4..7,
+                    word: "teh".into(),
+                    guesses: vec!["the".into()],
+                    at: point(px(4.), px(4.)),
+                    revision: input.revision,
+                });
+                input.insert_at_caret("x", cx);
+                assert_ne!(input.revision, input.spell_menu.as_ref().unwrap().revision);
+
+                // The frame that would close it, without waiting for one.
+                input.sync_spell_check(cx);
+                assert!(input.spell_menu.is_none(), "an edit closes the menu");
+            });
+        });
+    }
+
+    /// A pick against a buffer that no longer holds the menu's word is refused
+    /// rather than editing the wrong bytes.
+    #[gpui::test]
+    fn a_stale_pick_never_touches_the_buffer(cx: &mut gpui::TestAppContext) {
+        let input = cx.update(|cx| {
+            cx.set_global(crate::theme::Theme::dark());
+            cx.new(|cx| ComposerInput::new(cx).with_text("fix the bug"))
+        });
+        cx.update(|cx| {
+            input.update(cx, |input, cx| {
+                input.spell_menu = Some(SpellMenu {
+                    range: 4..7,
+                    word: "teh".into(),
+                    guesses: vec!["ten".into()],
+                    at: point(px(0.), px(0.)),
+                    revision: input.revision,
+                });
+                input.apply_spell_guess(0, cx);
+                assert_eq!(input.text(), "fix the bug", "the pick is refused");
+                assert!(input.spell_menu.is_none());
+            });
+        });
+    }
+
+    /// The painted menu: a right-click on the marked word lays the suggestions
+    /// out at the pointer, and clicking one applies it.
+    #[gpui::test]
+    fn the_menu_paints_at_the_pointer_and_a_row_replaces_the_word(cx: &mut gpui::TestAppContext) {
+        use crate::theme::{Theme, ThemeId};
+
+        let input = cx.update(|cx| {
+            cx.set_global(Theme::for_id(ThemeId::Orbit));
+            cx.new(|cx| {
+                ComposerInput::new(cx)
+                    .with_text("fix teh bug")
+                    .with_spell_check(true)
+            })
+        });
+        let cx = cx.add_empty_window();
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            let _ = cx.draw(
+                point(px(0.), px(0.)),
+                gpui::size(px(420.), px(160.)),
+                |_, _| input.clone(),
+            );
+        };
+        draw(cx);
+        cx.update(|_, cx| {
+            input.update(cx, |input, _| {
+                input.spell_ranges = std::slice::from_ref(&(4..7)).to_vec()
+            })
+        });
+
+        // Right-click on `teh` (byte 5), using the layout the draw just made.
+        let at = cx.update(|_, cx| {
+            let input = input.read(cx);
+            let origin = input.last_bounds.expect("laid out").origin;
+            origin + input.position_for_offset(5) + point(px(1.), px(6.))
+        });
+        cx.simulate_mouse_down(at, MouseButton::Right, gpui::Modifiers::none());
+        draw(cx);
+        cx.update(|_, cx| {
+            let menu = input.read(cx).spell_menu.as_ref().expect("menu open");
+            assert_eq!(menu.range, 4..7, "the menu is about the marked word");
+            assert_eq!(menu.at, at, "it opens where the pointer clicked");
+        });
+        // The guesses come from the checker, which is dark in a test, so the
+        // menu shows its honest empty state next to the learn row.
+        assert!(
+            cx.debug_bounds("spell-learn").is_some(),
+            "the learn row is always offered"
+        );
+
+        cx.update(|_, cx| {
+            input.update(cx, |input, cx| {
+                input.spell_menu = Some(SpellMenu {
+                    range: 4..7,
+                    word: "teh".into(),
+                    guesses: vec!["the".into(), "ten".into()],
+                    at,
+                    revision: input.revision,
+                });
+                cx.notify();
+            });
+        });
+        draw(cx);
+        let row = cx
+            .debug_bounds("spell-suggestion-1")
+            .expect("second suggestion painted")
+            .center();
+        // A test window resolves the hit path from the pointer's last move, so
+        // settle the pointer on the row before clicking it.
+        cx.simulate_mouse_move(row, None, gpui::Modifiers::none());
+        draw(cx);
+        cx.simulate_mouse_down(row, MouseButton::Left, gpui::Modifiers::none());
+        // A press on the menu repaints (the row takes the press); the release
+        // is the gesture that acts, exactly as in the running app.
+        draw(cx);
+        cx.simulate_mouse_up(row, MouseButton::Left, gpui::Modifiers::none());
+        cx.update(|_, cx| {
+            assert_eq!(input.read(cx).text(), "fix ten bug");
+            assert!(input.read(cx).spell_menu.is_none());
+        });
     }
 
     /// The placeholder names what Enter does: the idle key normally, a

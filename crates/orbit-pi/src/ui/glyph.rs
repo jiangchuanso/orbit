@@ -59,7 +59,7 @@ pub(crate) fn icon_tile(glyph: impl IntoElement, look: TileLook, theme: &Theme) 
         }
         TileLook::Raised => tile
             .rounded(Radius::Large.px(theme))
-            .bg(theme.surface_elevated)
+            .bg(theme.control_face(theme.surface_elevated))
             .border_1()
             .border_color(theme.hairline()),
     };

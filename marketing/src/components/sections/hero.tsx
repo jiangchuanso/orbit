@@ -89,7 +89,7 @@ export async function Hero({ locale }: { locale: Locale }) {
                 </>
               );
               const className =
-                "group inline-flex items-center gap-1.5 text-[12px] text-ink-3 no-underline transition-colors hover:text-ink-2";
+                "group inline-flex items-center gap-1.5 text-[13px] text-ink-3 no-underline transition-colors hover:text-ink-2";
 
               return href ? (
                 <a

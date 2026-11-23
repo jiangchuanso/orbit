@@ -194,12 +194,40 @@ pub fn restore(saved: &Saved, displays: &[DisplayInfo], min_size: Size<Pixels>) 
                 .0
         }
     };
+    let screen = displays[display].bounds;
+    let mut bounds = clamp(saved.bounds, screen, min_size);
+    // A maximized window opens at its restore frame and is then zoomed. If
+    // that frame already (nearly) fills the display, macOS takes the window
+    // for zoomed and `zoom:` shrinks it instead — the window opens a little
+    // short of the screen and is saved un-maximized. Such a frame is also
+    // useless to un-maximize to, so it gives way to the first-launch frame.
+    if saved.maximized && nearly_fills(bounds, screen) {
+        bounds = clamp(default_frame(screen), screen, min_size);
+    }
     Some(Restore {
-        bounds: clamp(saved.bounds, displays[display].bounds, min_size),
+        bounds,
         maximized: saved.maximized,
         fullscreen: saved.fullscreen,
         display,
     })
+}
+
+/// The windowed frame a first launch gives `display`: 85% of its width and
+/// 90% of its height, capped at 1440 × 920, centred on it.
+pub fn default_frame(display: Bounds<Pixels>) -> Bounds<Pixels> {
+    let width = (f32::from(display.size.width) * 0.85).min(1440.);
+    let height = (f32::from(display.size.height) * 0.9).min(920.);
+    let x = f32::from(display.origin.x) + (f32::from(display.size.width) - width) / 2.;
+    let y = f32::from(display.origin.y) + (f32::from(display.size.height) - height) / 2.;
+    Bounds::new(point(px(x), px(y)), size(px(width), px(height)))
+}
+
+/// Whether `frame` covers (nearly) all of `display` — more than the menu bar
+/// and a Dock leave of it. The display's bounds are the whole screen, so the
+/// thresholds sit below its usable area rather than at it.
+fn nearly_fills(frame: Bounds<Pixels>, display: Bounds<Pixels>) -> bool {
+    f32::from(frame.size.width) >= f32::from(display.size.width) * 0.92
+        && f32::from(frame.size.height) >= f32::from(display.size.height) * 0.85
 }
 
 /// `bounds` resized to fit `display` and moved fully onto it.
@@ -397,6 +425,48 @@ mod tests {
         )
         .unwrap();
         assert_eq!(got.bounds.size, min());
+    }
+
+    /// The reported bug: a maximized window whose restore frame was caught
+    /// mid-zoom (nearly the whole screen) reopened 20pt short of the screen
+    /// and un-maximized, because zooming a window already at the zoomed size
+    /// shrinks it. Its restore frame now gives way to the first-launch frame,
+    /// so the window still reopens maximized and can be un-maximized.
+    #[test]
+    fn a_maximized_window_with_a_near_full_restore_frame_gets_a_real_one() {
+        let screen = rect(0., 0., 1470., 956.);
+        let display = DisplayInfo {
+            uuid: Some("air".into()),
+            bounds: screen,
+        };
+        let caught_mid_zoom = rect(0., 34., 1450., 902.);
+        let got = restore(
+            &saved(caught_mid_zoom, true, Some("air")),
+            std::slice::from_ref(&display),
+            min(),
+        )
+        .unwrap();
+        assert!(matches!(got.window_bounds(), WindowBounds::Maximized(_)));
+        assert_eq!(got.bounds, default_frame(screen));
+        assert!(!nearly_fills(got.bounds, screen), "{:?}", got.bounds);
+
+        // The same frame on a window that was *not* maximized is the user's
+        // own choice and comes back unchanged.
+        let windowed = restore(
+            &saved(caught_mid_zoom, false, Some("air")),
+            &[display],
+            min(),
+        )
+        .unwrap();
+        assert_eq!(windowed.bounds, caught_mid_zoom);
+    }
+
+    #[test]
+    fn a_wide_but_short_restore_frame_is_kept_when_maximized() {
+        let frame = rect(0., 100., 1512., 600.);
+        let got = restore(&saved(frame, true, Some("laptop")), &[laptop()], min()).unwrap();
+        assert_eq!(got.bounds.size.width, px(1512.));
+        assert_eq!(got.bounds.size.height, px(640.), "only the minimum height applies");
     }
 
     #[test]

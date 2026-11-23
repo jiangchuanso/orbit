@@ -72,8 +72,9 @@ const QUOTA_POPOVER_MAX_H: f32 = 460.;
 /// How much a hidden provider card is dimmed inside the popover's "Hidden"
 /// group: present and readable, but visibly out of the active list.
 const HIDDEN_CARD_DIM: f32 = 0.6;
-/// The session-details dock's card width, and the gutter between it and the
-/// chat column (the Explorer's dock uses the same 12px gutter).
+/// The session-details dock's card width, and the horizontal room its card
+/// gutters take: [`panel::gutter`] beside the chat column and again at the
+/// window's right edge (6px each at the default density), like the Explorer.
 pub(super) const SESSION_DETAILS_W: f32 = 320.;
 pub(super) const SESSION_DETAILS_GUTTER: f32 = 12.;
 /// The details card's header row, matching the Explorer's header height.
@@ -1011,6 +1012,14 @@ impl OrbitApp {
             self.respond_to_approval(None, window, cx);
             return;
         }
+        // The composer's right-click spelling menu sits above everything it
+        // belongs to, so Escape closes it before the autocomplete menu, the
+        // composer's own pickers, or a running run.
+        if self.input.read(cx).is_spell_menu_open() {
+            self.input
+                .update(cx, |input, cx| input.close_spell_menu(cx));
+            return;
+        }
         if self.autocomplete.borrow().open {
             self.autocomplete_dismissed = true;
             cx.notify();
@@ -1246,6 +1255,8 @@ impl OrbitApp {
         self.cancel_new_task_settle();
         self.pending_session_rename = None;
         self.session_rename_ready = false;
+        self.pending_session_branch = None;
+        self.session_branch_ready = false;
         self.settings_open = false;
         self.provider_editor = None;
         self.provider_key_editor = None;
@@ -1602,6 +1613,8 @@ impl OrbitApp {
         }
         self.pending_session_rename = None;
         self.session_rename_ready = false;
+        self.pending_session_branch = None;
+        self.session_branch_ready = false;
         // Opening a session means viewing the chat: leave whichever full-page
         // surface (GitHub / Usage) was covering the main area. Without this
         // the switch happens out of sight and the page stays up, so clicking
@@ -2383,7 +2396,6 @@ impl OrbitApp {
                         .py(px(0.))
                         .px(DynamicSpacing::Base06.px(&theme))
                         .text_size(TextSize::Small.px(&theme))
-                        .bg(theme.background)
                         .overflow_hidden()
                         .child(self.session_name_input.clone()),
                 )
@@ -2767,15 +2779,19 @@ impl OrbitApp {
             .child(div().flex_none().h(DynamicSpacing::Base08.px(&theme)));
 
         // The dock reads as a rounded card beside the chat, like the Explorer:
-        // a 12px gutter on the left, then a flat surface with a hairline —
-        // glass over a full-window wallpaper, like the pages.
+        // the card gutter beside the chat, at the window's right edge and at
+        // its bottom, then a flat surface with a hairline — glass over a
+        // full-window wallpaper, like the pages.
+        let gutter = crate::theme::tokens::panel::gutter(&theme);
         div()
             .id("session-details-panel")
             .debug_selector(|| "session-details-panel".into())
             .flex_none()
             .w(px(SESSION_DETAILS_GUTTER + SESSION_DETAILS_W))
             .h_full()
-            .pl(px(SESSION_DETAILS_GUTTER))
+            .pl(gutter)
+            .pr(gutter)
+            .pb(gutter)
             .flex()
             .flex_col()
             .min_h_0()
@@ -3666,7 +3682,7 @@ impl OrbitApp {
 
     /// The keyboard/menu route to the sidebar toggle (cmd/ctrl-b, View ▸
     /// Toggle Sidebar). Shares [`Self::toggle_sidebar`] with the titlebar
-    /// button, so both animate the same slide generation.
+    /// button, so both slide the same panel.
     pub(super) fn on_toggle_sidebar_action(
         &mut self,
         _: &crate::ToggleSidebar,
@@ -3677,14 +3693,13 @@ impl OrbitApp {
         cx.notify();
     }
 
-    /// Flip the sessions sidebar and bump the slide generation, so the render
-    /// animates the change (and every open→close→open cycle re-animates).
-    /// Hiding the sidebar while it holds keyboard focus hands focus back to
-    /// the composer — a clipped column must never swallow typing.
+    /// Flip the sessions sidebar. The render drives its slide from the panel's
+    /// own open state (`motion::panel::slide`), so the change is all this has to
+    /// commit. Hiding the sidebar while it holds keyboard focus hands focus back
+    /// to the composer — a clipped column must never swallow typing.
     pub(super) fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let had_focus = window.focused(cx) == Some(self.sidebar_focus.clone());
         self.sidebar_visible = !self.sidebar_visible;
-        self.sidebar_slide_gen = self.sidebar_slide_gen.wrapping_add(1);
         if !self.sidebar_visible {
             self.sidebar_cursor = None;
             if had_focus {

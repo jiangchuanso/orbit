@@ -222,8 +222,9 @@ fn the_picker_lists_this_device_then_the_remote_hosts_then_add_to_server(
             let rows = app.work_in_rows().expect("a repository has rows");
             assert_eq!(
                 rows.len(),
-                5,
-                "current checkout, new worktree, existing worktrees, the host, add to server"
+                6,
+                "current checkout, new worktree, existing worktrees, the host, add to server, \
+                 add remote host"
             );
             let WorkInRow::Folder(local) = &rows[0] else {
                 panic!("the first row is this device");
@@ -244,6 +245,31 @@ fn the_picker_lists_this_device_then_the_remote_hosts_then_add_to_server(
                 rows[4],
                 WorkInRow::AddToServer,
                 "putting the project on a server sits under the hosts"
+            );
+            assert_eq!(
+                rows[5],
+                WorkInRow::AddRemoteHost,
+                "configuring another host closes the Remote section"
+            );
+            // Two sections: This device over the local places, Remote from
+            // the first host on.
+            use crate::app::worktrees::{work_in_section_start, WorkInSection};
+            assert_eq!(work_in_section_start(&rows, 0), Some(WorkInSection::Device));
+            assert_eq!(work_in_section_start(&rows, 1), None);
+            assert_eq!(work_in_section_start(&rows, 3), Some(WorkInSection::Remote));
+            assert_eq!(work_in_section_start(&rows, 4), None);
+            assert_eq!(work_in_section_start(&rows, 5), None);
+
+            // With no host configured the Remote section still offers the way
+            // to add one, and Add to a server (which needs a host) is absent.
+            app.work_in_hosts.clear();
+            let rows = app.work_in_rows().expect("rows");
+            assert_eq!(rows.last(), Some(&WorkInRow::AddRemoteHost));
+            assert!(!rows.contains(&WorkInRow::AddToServer));
+            let remote_ix = rows.len() - 1;
+            assert_eq!(
+                work_in_section_start(&rows, remote_ix),
+                Some(WorkInSection::Remote)
             );
             assert_eq!(
                 app.work_in_selected_ix(&rows),
@@ -1119,4 +1145,32 @@ fn the_folder_picker_draws_no_worktree_or_host_rows(cx: &mut gpui::TestAppContex
         "the worktree is not a folder row"
     );
     assert!(window_cx.debug_bounds("workspace-actions").is_none());
+}
+
+/// "Add remote host…" closes the picker and opens Settings → Remote hosts
+/// with the add-host form up, since that form is painted by Settings (#166).
+#[gpui::test]
+fn add_remote_host_opens_the_host_form_in_settings(cx: &mut gpui::TestAppContext) {
+    let fixture = Fixture::new("add-remote-host");
+    let app = test_app(cx);
+    let cx = cx.add_empty_window();
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.worktrees = vec![worktree(&fixture.repo(), "repo", true, false)];
+            app.worktree_repo_root = Some(fixture.repo());
+            app.current_workspace = Some(fixture.repo());
+            app.transcript.clear();
+            app.toggle_work_in_menu(window, cx);
+            let rows = app.work_in_rows().expect("rows");
+            let add = rows
+                .iter()
+                .position(|row| *row == WorkInRow::AddRemoteHost)
+                .expect("the Add remote host row");
+            app.run_work_in_item(add, window, cx);
+            assert!(!app.work_in_menu_open, "the picker closes");
+            assert!(app.settings_open, "Settings opens");
+            assert_eq!(app.settings_section, SettingsSection::RemoteHosts);
+            assert!(app.remote_host_editor.is_some(), "with the add-host form up");
+        });
+    });
 }

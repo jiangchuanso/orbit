@@ -81,7 +81,7 @@ use crate::usage::page::UsagePage;
 use crate::watch;
 use crate::widgets::{ExtensionWidget, WidgetPlacement};
 use crate::workflow::WorkflowMode;
-use crate::workspace_mark::WorkspaceMark;
+use crate::workspace_mark::{self, WorkspaceMark};
 use crate::workspace_picker::{WorkspaceEntry, WorkspacePicker};
 
 const SIDEBAR_DEFAULT_W: f32 = 272.;
@@ -315,6 +315,23 @@ pub(crate) enum QuitPlan {
     Wait,
 }
 
+/// The occupant of the right dock: Review (or one of its subagent tabs), the
+/// Explorer, or session details. They are mutually exclusive by construction —
+/// opening one closes the others — so the slot holds at most one at a time.
+///
+/// The app remembers the last occupant because a dock that is closing keeps
+/// painting its own content through the slide (`motion::panel::slide`): by the
+/// time the width is moving, every `*_visible` flag is already false, and the
+/// slot still has to know which card is on its way out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum RightDock {
+    #[default]
+    None,
+    Explorer,
+    Review,
+    Details,
+}
+
 pub(crate) use crate::ui::dialog::{ModalFocus, ReturnFocus};
 
 pub struct OrbitApp {
@@ -388,11 +405,10 @@ pub struct OrbitApp {
     /// Re-record the arrangement whenever a panel opens or closes, so the next
     /// launch lands in the same shape.
     _layout_subs: Vec<Subscription>,
-    /// Bumped on every sidebar toggle. The render keys its slide animation on
-    /// it, so an open→close→open cycle animates every time (a boolean key
-    /// would let the repeat skip) while the first frame — generation 0 — draws
-    /// the settled state with no launch animation.
-    sidebar_slide_gen: u64,
+    /// Which dock last held the right slot. A dock that is closing keeps
+    /// painting its own content while the slot slides shut (see
+    /// `motion::panel::slide`), so the card never blanks on the way out.
+    right_dock_slot: RightDock,
     /// Whether a feature page (Files / Git / Usage / AI Review) was open on
     /// the previous frame. A full-page Review pane yields only to a page that
     /// *opens* under it, never to one that was already there when the reader
@@ -538,6 +554,25 @@ pub struct OrbitApp {
     /// Generation of the newest branch fetch; a late result from an older
     /// fetch is discarded.
     branch_fetch: u64,
+    /// What the sidebar's Git button flags: local changes (read with the
+    /// branch above) and new GitHub issues / pull requests (`git_activity_ui`).
+    git_activity: crate::git_activity::Activity,
+    /// The GitHub-check switch and what the user has seen, per repository.
+    git_activity_store: crate::git_activity::Store,
+    /// When the last GitHub check started; `None` before the first.
+    github_checked_at: Option<Instant>,
+    /// Whether a GitHub check is running (one at a time).
+    github_checking: bool,
+    /// The workspace the last check was started for; a different current
+    /// workspace makes a check due at once.
+    github_checked_for: Option<PathBuf>,
+    /// The workspace the last check resolved, with its `owner/name`.
+    github_repo: Option<(PathBuf, String)>,
+    /// The signed-in GitHub login, so the user's own items never count as new.
+    github_login: Option<String>,
+    /// The Git page's GitHub tab on the last tick, so arriving on one marks
+    /// it seen once rather than on every frame.
+    git_host_tab: Option<crate::git_activity::Kind>,
     /// Branch per listed project, for the sidebar rows' metadata line. Keyed
     /// by workspace path (the same canonical spelling the rows resolve their
     /// session's `cwd` to). A workspace that is not a git repository — or is
@@ -564,6 +599,9 @@ pub struct OrbitApp {
     /// kind travels with the entity; creating/dropping this *is* the
     /// open/closed state. Each popup is anchored above its own chip.
     model_selector: Option<(PickerKind, Entity<ModelSelector>)>,
+    /// The composer chip row's top edge, recorded as it lays out. The open
+    /// picker reads it to cap its height, so it opens wholly above its chip.
+    chip_top: std::rc::Rc<std::cell::Cell<Option<gpui::Pixels>>>,
     /// The window-wide command palette (⌘P / ⌘K / sidebar Search row), if open.
     command_palette: Option<Entity<CommandPalette>>,
     /// Whatever held focus when the palette opened, so dismissing it can hand
@@ -739,11 +777,16 @@ pub struct OrbitApp {
     /// opens): the activation observer that gates notifications, and the
     /// window-closed observer that clears that gate.
     _window_watchers: Vec<Subscription>,
-    /// The main window's last frame (#131), written to `window.json` on a
-    /// debounce, on close and on quit. `None` until a window registers.
+    /// The main window's last *settled* frame (#131): one that held still for
+    /// the debounce. It is what `window.json` holds, and the only frame a
+    /// zoom may take as its restore frame. `None` until a window registers.
     window_state: Option<crate::window_state::Saved>,
-    /// The pending debounced write of `window_state`; replacing it cancels
-    /// the previous one.
+    /// The newest frame seen, not yet settled. A zoom or Fill animates, and
+    /// its in-between frames land here so they never become the restore
+    /// frame of the maximized state they lead to.
+    window_state_pending: Option<crate::window_state::Saved>,
+    /// The debounce that settles `window_state_pending` and writes it;
+    /// replacing it cancels the previous one.
     window_state_save: Option<gpui::Task<()>>,
     /// Keeps the bounds, close and quit observers behind `window_state`.
     _window_state_watchers: Vec<Subscription>,
@@ -796,8 +839,15 @@ pub struct OrbitApp {
     /// Session whose hover card is visible. The card is pinned to that row,
     /// not to the pointer.
     session_card: Option<PathBuf>,
-    /// Session the pointer is on, while the hover delay has not elapsed.
+    /// Session row the pointer is on (also owns the initial hover delay).
     session_card_wait: Option<PathBuf>,
+    /// Popup hover is independent: GPUI may enter it before leaving the row.
+    session_card_popup_hover: Option<PathBuf>,
+    /// Where the session preview is scrolled to. The card is the only place a
+    /// keyboard reader sees a session's full path and provider list, and the
+    /// wheel is not available to them, so the sidebar's Page Up / Page Down
+    /// move this handle.
+    session_card_scroll: ScrollHandle,
     /// Cancels a pending hover card when the pointer leaves the row.
     session_card_task: gpui::Task<()>,
     /// Open row-actions menu on a workspace group header (which workspace's
@@ -1103,6 +1153,10 @@ pub struct OrbitApp {
     /// A row-menu rename waiting for the target session's state to load.
     pending_session_rename: Option<PathBuf>,
     session_rename_ready: bool,
+    /// A row-menu **Branch from…** waiting for the target session to load,
+    /// and the flag that opens the message picker once it has (#166).
+    pending_session_branch: Option<PathBuf>,
+    session_branch_ready: bool,
     /// A popover-triggered title generation is in flight; the next
     /// `session_info_changed` seeds the rename field from its result.
     title_generating: bool,
@@ -1305,6 +1359,7 @@ pub struct OrbitApp {
     /// closed by hand. A provider with no entry follows the page's default
     /// (open for the active provider and while a filter narrows its models).
     provider_models_open: HashMap<String, bool>,
+    provider_model_filters: HashMap<String, (Entity<ComposerInput>, Subscription)>,
     /// True while the Providers & models page's "Update model list" runs pi's
     /// catalog refresh and reloads the agent.
     models_refreshing: bool,
@@ -1492,6 +1547,10 @@ pub struct OrbitApp {
     remote_resuming: bool,
     /// Hands focus back to whatever opened `server_clone` once it closes.
     server_clone_focus: ModalFocus,
+    /// The project Rename dialog, while open (`project_rename_ui.rs`).
+    project_rename: Option<project_rename_ui::ProjectRename>,
+    /// Hands focus back to whatever opened `project_rename` once it closes.
+    project_rename_focus: ModalFocus,
     remote_host_checks: std::collections::HashMap<String, remote_hosts_ui::HostCheck>,
     /// SSH passwords entered this run, keyed by ssh account
     /// (`RemoteHost::account_key`). Memory only: never written, dropped the
@@ -1850,6 +1909,7 @@ impl OrbitApp {
                 .with_key_context("Composer ChatComposer")
                 .with_autocomplete(autocomplete.clone())
                 .with_prompt_history(prompt_history.clone())
+                .with_spell_check(true)
                 .with_attachments(true)
         });
         // The chat input is the workbench's home tab stop; every other
@@ -2051,9 +2111,14 @@ impl OrbitApp {
         // default; a deleted folder falls back to cwd. Sessions live in the
         // real ~/.pi/agent/sessions so they are shared with the CLI.
         let workspace = load_last_workspace()
-            .or_else(|| std::env::current_dir().ok())
-            .map(|path| sessions::canonical_workspace_path(&path))
-            .unwrap_or_else(|| PathBuf::from("."));
+            .unwrap_or_else(|| {
+                first_launch_workspace(
+                    std::env::current_dir().ok(),
+                    std::env::current_exe().ok(),
+                    crate::platform::home_dir_opt(),
+                )
+            });
+        let workspace = sessions::canonical_workspace_path(&workspace);
         let workspace_logo = crate::workspace_logo::load(&workspace);
         let extensions = BundledExtensions::install();
         // Teach the installed pi's RPC mode the capabilities Orbit uses
@@ -2451,7 +2516,7 @@ impl OrbitApp {
             wallpaper_library_generation: 0,
             sidebar_list: ListState::new(0, ListAlignment::Top, px(44.)),
             sidebar_visible: true,
-            sidebar_slide_gen: 0,
+            right_dock_slot: RightDock::None,
             feature_open_last: false,
             backdrop_live: false,
             backdrop_clock: None,
@@ -2512,6 +2577,14 @@ impl OrbitApp {
             workspace_logo,
             branch: None,
             branch_fetch: 0,
+            git_activity: crate::git_activity::Activity::default(),
+            git_activity_store: crate::git_activity::Store::load(),
+            github_checked_at: None,
+            github_checking: false,
+            github_checked_for: None,
+            github_repo: None,
+            github_login: None,
+            git_host_tab: None,
             sidebar_branches: HashMap::new(),
             sidebar_logos: HashMap::new(),
             sidebar_branches_for: Vec::new(),
@@ -2522,6 +2595,7 @@ impl OrbitApp {
             available_models: Vec::new(),
             available_thinking_levels: Vec::new(),
             model_selector: None,
+            chip_top: Default::default(),
             command_palette: None,
             palette_return_focus: ReturnFocus::default(),
             dialog_return_focus: ReturnFocus::default(),
@@ -2593,6 +2667,7 @@ impl OrbitApp {
             activate_window_pending: false,
             _window_watchers: Vec::new(),
             window_state: None,
+            window_state_pending: None,
             window_state_save: None,
             _window_state_watchers: Vec::new(),
             session_history: Vec::new(),
@@ -2614,6 +2689,8 @@ impl OrbitApp {
             sidebar_sort_menu: false,
             session_card: None,
             session_card_wait: None,
+            session_card_popup_hover: None,
+            session_card_scroll: ScrollHandle::new(),
             session_card_task: gpui::Task::ready(()),
             workspace_menu: None,
             worktree_config,
@@ -2744,6 +2821,8 @@ impl OrbitApp {
             session_details_open: false,
             session_name_editing: false,
             pending_session_rename: None,
+            pending_session_branch: None,
+            session_branch_ready: false,
             session_rename_ready: false,
             title_generating: false,
             rename_saved_at: None,
@@ -2822,6 +2901,7 @@ impl OrbitApp {
             _provider_filter_sub: provider_filter_sub,
             models_favorites_only: false,
             provider_models_open: HashMap::new(),
+            provider_model_filters: HashMap::new(),
             models_refreshing: false,
             skills: Vec::new(),
             subagents: Vec::new(),
@@ -2886,6 +2966,8 @@ impl OrbitApp {
             remote_sessions_collapsed: HashSet::new(),
             remote_resuming: false,
             server_clone_focus: ModalFocus::default(),
+            project_rename: None,
+            project_rename_focus: ModalFocus::default(),
             remote_host_checks: std::collections::HashMap::new(),
             remote_host_secrets: std::collections::HashMap::new(),
             remote_password_prompt: None,
@@ -3076,6 +3158,9 @@ impl OrbitApp {
             // values on the next frame.
             if app.window_active {
                 theme::refresh_os_display_prefs();
+                // Issues and pull requests may have arrived while the user
+                // was elsewhere; the Git button catches up on return.
+                app.check_github_on_focus(cx);
             }
         });
         // Closing the window ends the observer above on its last value — and
@@ -3119,6 +3204,11 @@ impl OrbitApp {
                 .display(cx)
                 .and_then(|d| d.uuid().ok())
                 .map(|uuid| uuid.to_string());
+            // The restore frame comes from the settled state, never from a
+            // frame mid-animation: zooming passes through near-full frames
+            // that report as windowed, and keeping one of those would
+            // reopen the window un-zoomable (macOS treats a window already
+            // at the zoomed size as zoomed, so `zoom:` shrinks it instead).
             let state = crate::window_state::Saved::observe(
                 app.window_state.as_ref(),
                 window.window_bounds(),
@@ -3126,13 +3216,31 @@ impl OrbitApp {
                 window.is_fullscreen(),
                 display,
             );
-            if app.window_state.as_ref() == Some(&state) {
+            let latest = app
+                .window_state_pending
+                .as_ref()
+                .or(app.window_state.as_ref());
+            if latest == Some(&state) {
                 return;
             }
-            app.window_state = Some(state.clone());
-            app.window_state_save = Some(cx.background_spawn(async move {
-                gpui::Timer::after(std::time::Duration::from_millis(500)).await;
-                state.persist();
+            app.window_state_pending = Some(state.clone());
+            app.window_state_save = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(500))
+                    .await;
+                let settled = this
+                    .update(cx, |app, _| {
+                        let state = app.window_state_pending.take()?;
+                        app.window_state = Some(state.clone());
+                        Some(state)
+                    })
+                    .ok()
+                    .flatten();
+                if let Some(state) = settled {
+                    cx.background_executor()
+                        .spawn(async move { state.persist() })
+                        .await;
+                }
             }));
         });
         let this = cx.weak_entity();
@@ -3149,6 +3257,9 @@ impl OrbitApp {
     /// Write the pending window frame now instead of after the debounce.
     fn flush_window_state(&mut self) {
         if self.window_state_save.take().is_some() {
+            if let Some(state) = self.window_state_pending.take() {
+                self.window_state = Some(state);
+            }
             if let Some(state) = &self.window_state {
                 state.persist();
             }
@@ -3384,13 +3495,18 @@ impl OrbitApp {
         };
         let row_cwd = cwd.clone();
         cx.spawn(async move |this, cx| {
-            let branch = cx
+            let (branch, changes) = cx
                 .background_executor()
                 .spawn(async move {
-                    crate::git::current_branch(&cwd).map(|name| BranchStatus {
+                    let branch = crate::git::current_branch(&cwd).map(|name| BranchStatus {
                         name,
                         ahead_behind: crate::git::ahead_behind(&cwd),
-                    })
+                    });
+                    // One porcelain line per changed path, staged or not: the
+                    // Git button's local-changes count. Not a repository (or
+                    // no git) reads as nothing changed.
+                    let changes = crate::git::status_rows(&cwd).map_or(0, |rows| rows.len());
+                    (branch, changes)
                 })
                 .await;
             let line = branch.as_ref().map(|branch| BranchLine {
@@ -3416,6 +3532,10 @@ impl OrbitApp {
                 }
                 if app.branch != branch {
                     app.branch = branch;
+                    cx.notify();
+                }
+                if app.git_activity.changes != changes {
+                    app.git_activity.changes = changes;
                     cx.notify();
                 }
             });
@@ -3930,7 +4050,7 @@ fn parse_workspace_store(value: &Value) -> WorkspaceStore {
                 WorkspaceMark::default(),
             ),
             // Current format: `{ "path": …, "added_at": <unix secs>,
-            // "icon": <stem>, "tint": <key> }`.
+            // "icon": <stem>, "tint": <key>, "name": <display name> }`.
             Value::Object(map) => {
                 let Some(raw) = map.get("path").and_then(Value::as_str) else {
                     continue;
@@ -3942,6 +4062,12 @@ fn parse_workspace_store(value: &Value) -> WorkspaceStore {
                 let mark = WorkspaceMark {
                     icon: map.get("icon").and_then(Value::as_str).map(str::to_string),
                     tint: map.get("tint").and_then(Value::as_str).map(str::to_string),
+                    name: map
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())
+                        .map(str::to_string),
                 };
                 (
                     sessions::canonical_workspace_path(Path::new(raw)),
@@ -4005,6 +4131,9 @@ fn workspace_store_json(store: &WorkspaceStore) -> Value {
             if let Some(tint) = mark.tint {
                 entry.insert("tint".into(), serde_json::json!(tint));
             }
+            if let Some(name) = mark.name {
+                entry.insert("name".into(), serde_json::json!(name));
+            }
             Value::Object(entry)
         })
         .collect();
@@ -4033,6 +4162,28 @@ fn load_last_workspace() -> Option<PathBuf> {
     let value = serde_json::from_str::<Value>(&raw).ok()?;
     let path = sessions::canonical_workspace_path(Path::new(value.get("path")?.as_str()?));
     path.is_dir().then_some(path)
+}
+
+/// The folder a launch with no remembered workspace starts in (#166).
+///
+/// The process cwd is only a meaningful project when someone chose it — a
+/// terminal launch. An app launched from the Dock, Start menu or a shortcut
+/// inherits `/` or the install folder, and offering Orbit's own binary
+/// directory as a project is never right. Those fall back to the home folder.
+pub(crate) fn first_launch_workspace(
+    cwd: Option<PathBuf>,
+    exe: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> PathBuf {
+    let install_dir = exe.as_deref().and_then(Path::parent);
+    let meaningful = cwd.filter(|cwd| {
+        let is_root = cwd.parent().is_none();
+        let in_install_dir = install_dir.is_some_and(|dir| cwd.starts_with(dir));
+        !is_root && !in_install_dir
+    });
+    meaningful
+        .or(home)
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn persist_last_workspace(path: &Path) {
@@ -4594,7 +4745,6 @@ enum SettingsSelect {
     TerminalFont,
     EditorFont,
     SpacingDensity,
-    CornerRounding,
     UiFontFamily,
     CodeFontFamily,
     WallpaperEffect,
@@ -4640,6 +4790,7 @@ mod dialogs;
 mod events;
 pub(crate) mod format;
 mod git_accounts_ui;
+mod git_activity_ui;
 mod mcp_ui;
 mod new_task;
 mod open_in;
@@ -4647,6 +4798,7 @@ mod permissions_ui;
 mod pi_update_ui;
 mod pickers;
 mod plugin_update_ui;
+mod project_rename_ui;
 mod project_trust_ui;
 mod provider_accounts;
 mod remote_hosts_ui;
@@ -4686,6 +4838,8 @@ mod cancel_tests;
 #[cfg(test)]
 mod composer_chrome_tests;
 #[cfg(test)]
+mod first_launch_tests;
+#[cfg(test)]
 mod composer_draft_tests;
 #[cfg(test)]
 mod composer_layout_tests;
@@ -4699,6 +4853,8 @@ mod error_label_tests;
 mod focus_return_tests;
 #[cfg(test)]
 mod git_chip_tests;
+#[cfg(test)]
+mod git_activity_tests;
 #[cfg(test)]
 mod manage_models_tests;
 #[cfg(test)]
@@ -4765,6 +4921,8 @@ mod sidebar_search_tests;
 mod sidebar_sort_tests;
 #[cfg(test)]
 mod sidepane_full_width_tests;
+#[cfg(test)]
+mod spellcheck_ui_tests;
 #[cfg(test)]
 mod stale_error_tests;
 #[cfg(test)]

@@ -36,7 +36,7 @@ export async function Trust({ locale }: { locale: Locale }) {
                 />
                 {title}
               </dt>
-              <dd className="mt-2 text-[12.5px] leading-[1.65] text-ink-2">
+              <dd className="mt-2 text-[13.5px] leading-[1.6] text-ink-2">
                 {copy}
               </dd>
             </div>

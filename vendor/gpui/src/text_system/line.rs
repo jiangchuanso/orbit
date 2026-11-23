@@ -26,6 +26,55 @@ pub struct DecorationRun {
     pub strikethrough: Option<StrikethroughStyle>,
 }
 
+/// Orbit patch: draw a run's `background_color` as a rounded chip fitted to
+/// the text instead of a hard rectangle the full line height tall.
+///
+/// Opt-in per text element (`StyledText::with_background_chips`), and only
+/// for runs whose background is exactly [`Self::color`]: a text selection or
+/// any other wash drawn through run backgrounds keeps the plain, continuous
+/// rectangle, and so does a terminal grid. Paint-only: glyph positions never
+/// move, so streaming text never reflows when a chip appears.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextBackgroundChip {
+    /// The run background this shape applies to (e.g. the inline-code wash).
+    pub color: Hsla,
+    /// Corner radius, capped at half the chip's height.
+    pub corner_radius: Pixels,
+    /// Extra width painted on each side of the run, behind its neighbours.
+    pub padding_x: Pixels,
+    /// Extra height above and below the font's ascent + descent box.
+    pub padding_y: Pixels,
+}
+
+impl TextBackgroundChip {
+    /// The chip for a run background whose plain rectangle is `run`: the
+    /// text's own box (`ascent + descent`, centred in the line the way glyphs
+    /// are) grown by the padding, never taller than the line itself.
+    pub fn bounds(
+        &self,
+        run: Bounds<Pixels>,
+        line_height: Pixels,
+        ascent: Pixels,
+        descent: Pixels,
+    ) -> Bounds<Pixels> {
+        let text_height = ascent + descent;
+        let padding_top = (line_height - text_height) / 2.;
+        let top = (run.origin.y + padding_top - self.padding_y).max(run.origin.y);
+        let bottom = (run.origin.y + padding_top + text_height + self.padding_y)
+            .min(run.origin.y + line_height);
+        Bounds {
+            origin: point(run.origin.x - self.padding_x, top),
+            size: size(run.size.width + self.padding_x * 2., bottom - top),
+        }
+    }
+
+    /// The radius for a chip of `height`: the configured one, but never more
+    /// than a capsule.
+    pub fn radius(&self, height: Pixels) -> Pixels {
+        self.corner_radius.min(height / 2.)
+    }
+}
+
 /// A line of text that has been shaped and decorated.
 #[derive(Clone, Default, Debug, Deref, DerefMut)]
 pub struct ShapedLine {
@@ -98,6 +147,7 @@ impl ShapedLine {
             None,
             &self.decoration_runs,
             &[],
+            None,
             window,
             cx,
         )?;
@@ -164,6 +214,22 @@ impl WrappedLine {
         window: &mut Window,
         cx: &mut App,
     ) -> Result<()> {
+        self.paint_background_with_chips(origin, line_height, align, bounds, None, window, cx)
+    }
+
+    /// Orbit patch: [`Self::paint_background`], drawing each run background
+    /// as `chip` when one is given.
+    #[allow(clippy::too_many_arguments)]
+    pub fn paint_background_with_chips(
+        &self,
+        origin: Point<Pixels>,
+        line_height: Pixels,
+        align: TextAlign,
+        bounds: Option<Bounds<Pixels>>,
+        chip: Option<TextBackgroundChip>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<()> {
         let align_width = match bounds {
             Some(bounds) => Some(bounds.size.width),
             None => self.layout.wrap_width,
@@ -177,6 +243,7 @@ impl WrappedLine {
             align_width,
             &self.decoration_runs,
             &self.wrap_boundaries,
+            chip,
             window,
             cx,
         )?;
@@ -430,6 +497,7 @@ fn paint_line_background(
     align_width: Option<Pixels>,
     decoration_runs: &[DecorationRun],
     wrap_boundaries: &[WrapBoundary],
+    chip: Option<TextBackgroundChip>,
     window: &mut Window,
     cx: &mut App,
 ) -> Result<()> {
@@ -440,6 +508,15 @@ fn paint_line_background(
             line_height * (wrap_boundaries.len() as f32 + 1.),
         ),
     );
+    // One place turns a run's plain rectangle into what is painted: itself,
+    // or a rounded chip fitted to the text (Orbit patch).
+    let paint_run = |window: &mut Window, bounds: Bounds<Pixels>, color: Hsla| match chip {
+        Some(chip) if chip.color == color => {
+            let bounds = chip.bounds(bounds, line_height, layout.ascent, layout.descent);
+            window.paint_quad(fill(bounds, color).corner_radii(chip.radius(bounds.size.height)));
+        }
+        _ => window.paint_quad(fill(bounds, color)),
+    };
     window.paint_layer(line_bounds, |window| {
         let mut decoration_runs = decoration_runs.iter();
         let mut wraps = wrap_boundaries.iter().peekable();
@@ -472,13 +549,14 @@ fn paint_line_background(
                         if glyph_origin.x == background_origin.x {
                             background_origin.x -= max_glyph_size.width.half()
                         }
-                        window.paint_quad(fill(
+                        paint_run(
+                            window,
                             Bounds {
                                 origin: *background_origin,
                                 size: size(glyph_origin.x - background_origin.x, line_height),
                             },
                             *background_color,
-                        ));
+                        );
                         background_origin.x = origin.x;
                         background_origin.y += line_height;
                     }
@@ -532,13 +610,14 @@ fn paint_line_background(
                     if background_origin.x == glyph_origin.x {
                         background_origin.x -= max_glyph_size.width.half();
                     };
-                    window.paint_quad(fill(
+                    paint_run(
+                        window,
                         Bounds {
                             origin: background_origin,
                             size: size(width, line_height),
                         },
                         background_color,
-                    ));
+                    );
                 }
             }
         }
@@ -554,13 +633,14 @@ fn paint_line_background(
             if last_line_end_x == background_origin.x {
                 background_origin.x -= max_glyph_size.width.half()
             };
-            window.paint_quad(fill(
+            paint_run(
+                window,
                 Bounds {
                     origin: background_origin,
                     size: size(last_line_end_x - background_origin.x, line_height),
                 },
                 background_color,
-            ));
+            );
         }
 
         Ok(())

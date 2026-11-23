@@ -7,22 +7,39 @@ use gpui::{Hsla, SharedString};
 
 use crate::theme::Theme;
 
-/// One workspace's stored mark. Both halves are optional; the defaults (the
-/// folder glyph, muted ink) apply when a field is unset.
+/// One workspace's stored mark. Every field is optional; the defaults (the
+/// folder glyph, muted ink, the folder's own name) apply when one is unset.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct WorkspaceMark {
     /// Embedded HugeIcons file stem, e.g. `rocket-01`.
     pub icon: Option<String>,
     /// Stable tint key — see [`TINTS`].
     pub tint: Option<String>,
+    /// The name the sidebar shows instead of the folder's (#166). Orbit-only:
+    /// the folder on disk and pi's sessions keep their own paths, and the
+    /// group's identity stays the folder label, so a rename moves nothing.
+    pub name: Option<String>,
 }
 
 impl WorkspaceMark {
     /// Whether the mark is the unstyled default. Such an entry is dropped
     /// instead of persisted, so an untouched workspace writes no extra keys.
     pub fn is_default(&self) -> bool {
-        self.icon.is_none() && self.tint.is_none()
+        self.icon.is_none() && self.tint.is_none() && self.name.is_none()
     }
+
+    /// The name to show for a project whose folder is labelled `folder`.
+    pub fn display_name<'a>(&'a self, folder: &'a str) -> &'a str {
+        self.name.as_deref().unwrap_or(folder)
+    }
+}
+
+/// The stored form of a name typed into the Rename dialog: trimmed, and
+/// `None` when it is empty or just the folder's own name, so clearing the
+/// field (or typing the folder name back) restores the default.
+pub(crate) fn custom_name(typed: &str, folder: &str) -> Option<String> {
+    let typed = typed.trim();
+    (!typed.is_empty() && typed != folder).then(|| typed.to_string())
 }
 
 /// A curated subset of the embedded HugeIcons set that reads as a project
@@ -330,7 +347,7 @@ mod tests {
         // A user-picked icon wins over the status glyph.
         let custom = WorkspaceMark {
             icon: Some("rocket-01".into()),
-            tint: None,
+            ..Default::default()
         };
         assert_eq!(
             resolved_icon_path(&custom, WorkspaceStatus::Current),
@@ -343,13 +360,37 @@ mod tests {
         assert!(WorkspaceMark::default().is_default());
         assert!(!WorkspaceMark {
             icon: Some("star".into()),
-            tint: None,
+            ..Default::default()
         }
         .is_default());
         assert!(!WorkspaceMark {
-            icon: None,
             tint: Some("accent".into()),
+            ..Default::default()
         }
         .is_default());
+        assert!(!WorkspaceMark {
+            name: Some("Website".into()),
+            ..Default::default()
+        }
+        .is_default());
+    }
+
+    #[test]
+    fn a_project_shows_its_custom_name_or_its_folder() {
+        let renamed = WorkspaceMark {
+            name: Some("Website".into()),
+            ..Default::default()
+        };
+        assert_eq!(renamed.display_name("site-2024"), "Website");
+        assert_eq!(WorkspaceMark::default().display_name("site-2024"), "site-2024");
+    }
+
+    #[test]
+    fn clearing_or_retyping_the_folder_name_restores_the_default() {
+        assert_eq!(custom_name("  Website  ", "site"), Some("Website".into()));
+        assert_eq!(custom_name("", "site"), None);
+        assert_eq!(custom_name("   ", "site"), None);
+        assert_eq!(custom_name("site", "site"), None);
+        assert_eq!(custom_name("网站", "site"), Some("网站".into()));
     }
 }

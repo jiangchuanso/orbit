@@ -446,9 +446,9 @@ mod tests {
         }
     }
 
-    /// Every key in `en.yml` must exist in every generated locale file. The
-    /// generator (`scripts/gen_locales.py`) guarantees this, but a manual edit
-    /// or a stale file would silently fall back to English — this catches it.
+    /// Every key in `en.yml` must exist in every locale file. Locale files are
+    /// hand-edited (`scripts/check_i18n.py --sync` adds new keys), so a missed
+    /// key would silently fall back to English — this catches it.
     #[test]
     fn locale_files_cover_every_english_key() {
         fn keys(src: &str) -> std::collections::BTreeSet<&str> {

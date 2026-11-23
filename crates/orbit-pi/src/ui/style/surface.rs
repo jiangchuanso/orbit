@@ -79,15 +79,16 @@ pub(crate) trait SurfaceExt: Styled + ParentElement + Sized {
         let radius = crate::theme::tokens::panel::RADIUS.px(theme);
         let el = self.relative().rounded(radius).border_1();
         let tint = page.card_fill(theme.surface_secondary);
-        match page.glass_sigma() {
-            Some(sigma) => el
-                .border_color(gpui::backdrop_blur_marker(sigma))
-                .bg(tint)
-                .child(body)
-                .child(frosted_edge(theme.hairline(), radius)),
-            None if page.wallpaper.active => el.border_color(theme.hairline()).bg(tint).child(body),
-            None => el.border_color(theme.hairline()).child(body),
-        }
+        // The hairline is always an overlay painted after the body. gpui
+        // clips children to a rectangle, so a body that paints its own fill
+        // or text into a corner would otherwise cover the card's own border
+        // arc there and leave the corner looking cut square.
+        let el = match page.glass_sigma() {
+            Some(sigma) => el.border_color(gpui::backdrop_blur_marker(sigma)).bg(tint),
+            None if page.wallpaper.active => el.border_color(gpui::transparent_black()).bg(tint),
+            None => el.border_color(gpui::transparent_black()),
+        };
+        el.child(body).child(frosted_edge(theme.hairline(), radius))
     }
 
     /// Frost a band laid over scrolling page content (a sticky header): the
@@ -202,6 +203,16 @@ impl<E: Styled + ParentElement> SurfaceExt for E {}
 /// cutting a tighter corner inside it.
 pub(crate) fn inspector_inner_radius(theme: &Theme) -> Pixels {
     crate::theme::tokens::panel::RADIUS.px(theme) - crate::theme::tokens::BORDER_WIDTH
+}
+
+/// The clear band a workbench card keeps under content that scrolls to its
+/// bottom edge (a code buffer, a diff, a page). gpui clips children to a
+/// rectangle, not to the card's rounded corner, so rows reaching the bottom
+/// would paint square through both bottom arcs and over the hairline. Ending
+/// the content one inner radius above the edge leaves the corner curve
+/// nothing to cut.
+pub(crate) fn card_corner_clearance(theme: &Theme) -> Pixels {
+    inspector_inner_radius(theme)
 }
 
 #[cfg(test)]
@@ -426,5 +437,21 @@ mod tests {
         }
         let chrome = include_str!("../chrome.rs");
         assert!(!chrome.contains(".a *="));
+        // A hand-built faced control (the Sync split button, the composer's
+        // stop, a stepper) takes its face from `control_face`, so it turns to
+        // glass with every shared button instead of staying an opaque slab.
+        for (name, source) in [
+            ("git", git),
+            ("view", include_str!("../../app/view.rs")),
+            ("mcp", mcp),
+            ("subagents", include_str!("../../app/subagents_ui.rs")),
+            ("ui/button", include_str!("../button.rs")),
+            ("ui/chip", include_str!("../chip.rs")),
+        ] {
+            assert!(
+                !source.contains(".raised(theme.surface_elevated"),
+                "{name} paints an opaque control face"
+            );
+        }
     }
 }

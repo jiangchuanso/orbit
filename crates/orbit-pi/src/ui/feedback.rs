@@ -11,7 +11,8 @@ use gpui::{
     IntoElement, ParentElement, Pixels, Styled, TextAlign, Transformation,
 };
 
-/// The app's shared loading spinner: `loader.svg` rotating once per 900 ms,
+/// The app's shared loading spinner: `loader.svg` (a faint full track with a
+/// quarter arc on top) rotating once per 900 ms,
 /// and rendered static under reduce-motion so the perpetual loop can be turned
 /// off. In-flight affordances (buttons, panels, tool cards) share this so
 /// "working" reads identically everywhere. `id` must be unique per instance —
@@ -42,17 +43,16 @@ pub(crate) fn skeleton_bar(
         .bg(theme.page_fill(theme.surface_secondary))
 }
 
-/// The sidebar's running-session indicator: one minimal accent arc turning in
-/// place, so the row reads as in flight without adding a second ring. Shares
-/// the same 900 ms cadence as [`spinner`], and renders static under
-/// reduce-motion.
+/// The sidebar's running-session indicator: the same track-and-arc glyph as
+/// [`spinner`], on the same 900 ms cadence, so "working" reads identically on a
+/// row and in a panel. Renders static under reduce-motion.
 pub(crate) fn running_spinner(
     id: impl Into<ElementId>,
     size: impl Into<Pixels>,
     color: Hsla,
     theme: Theme,
 ) -> AnyElement {
-    spinning_icon("icons/running-spinner.svg", id, size, color, theme)
+    spinning_icon("icons/loader.svg", id, size, color, theme)
 }
 
 fn spinning_icon(

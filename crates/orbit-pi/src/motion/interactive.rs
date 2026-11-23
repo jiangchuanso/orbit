@@ -36,8 +36,8 @@ use std::time::Instant;
 
 use gpui::{
     prelude::*, Animation, AnimationExt, AnyElement, App, Bounds, Element, ElementId,
-    GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement, LayoutId,
-    ParentElement, Pixels, SharedString, Styled, Window,
+    GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId, Interactivity, IntoElement,
+    LayoutId, ParentElement, Pixels, SharedString, StyleRefinement, Styled, Window,
 };
 
 use super::registry::Transitions;
@@ -126,6 +126,16 @@ impl Hover {
         }
     }
 
+    /// No treatment at all: a control that cannot act keeps its rest look
+    /// under the pointer. Still a `Hover` so a component has one return path.
+    pub(crate) fn none() -> Self {
+        Self {
+            rest_fill: None,
+            hover_fill: None,
+            ink: None,
+        }
+    }
+
     /// Hold the hovered look at rest while `held` — a menu row under the
     /// keyboard cursor reads exactly as the pointer's hover.
     pub(crate) fn held(self, held: bool) -> Self {
@@ -176,65 +186,185 @@ pub(crate) fn hover<T>(
     hover: Hover,
 ) -> AnyElement
 where
-    T: StatefulInteractiveElement + Styled + IntoElement + 'static,
+    T: StatefulInteractiveElement + Styled + ParentElement + IntoElement + 'static,
 {
-    // The role, named at every use: the guard in `scripts/check_motion.py`
-    // rejects a duration passed through a binding, so a reader can always see
-    // which band a surface is on.
-    let role = Motion::Interaction;
-    // `Theme` is `Copy`; the hover listener outlives this call, so it needs its
-    // own copy rather than the borrow.
-    let theme = *theme;
-    let name = name.into();
+    fade(element, name, theme, hover).into_any_element()
+}
 
-    if role.duration(&theme).is_zero() {
-        // Reduce Motion: the same treatment, applied on the frame the pointer
-        // arrives. `.hover` is a style closure, so this costs no state.
-        return element
-            .hover(move |style| {
-                let (fill, ink) = hover.at(1.0);
-                let style = match fill {
-                    Some(fill) => style.bg(fill),
-                    None => style,
-                };
-                match ink {
-                    Some(ink) => style.text_color(ink),
-                    None => style,
-                }
-            })
-            .into_any_element();
+/// The same fade, still accepting children — [`hover`] as a chain, not a leaf.
+///
+/// ```ignore
+/// // before
+/// el.hover_state(&theme).child(label).child(caret)
+/// // after
+/// crate::motion::fade(el, "save", &theme, Hover::wash(&theme))
+///     .child(label)
+///     .child(caret)
+/// ```
+///
+/// The fade is the last *styling and interaction* call. [`Hovered`] forwards
+/// `ParentElement` and nothing else, deliberately: forwarding `Styled` or
+/// `InteractiveElement` would be a second, thinner copy of those traits (sixty
+/// methods between them). A call site whose handler sits after the children
+/// moves the handler above the fade — binding the element first keeps that
+/// readable:
+///
+/// ```ignore
+/// let el = div().id(..).text_color(theme.text_secondary).on_click(handler);
+/// crate::motion::fade(el, name, &theme, Hover::row(&theme)).child(label)
+/// ```
+pub(crate) fn fade<T>(
+    element: T,
+    name: impl Into<SharedString>,
+    theme: &Theme,
+    hover: Hover,
+) -> Hovered<T>
+where
+    T: StatefulInteractiveElement + Styled + ParentElement + IntoElement + 'static,
+{
+    Hovered {
+        element,
+        children: Vec::new(),
+        name: name.into(),
+        // `Theme` is `Copy`; the hover listener outlives this call.
+        theme: *theme,
+        hover,
     }
+}
 
-    // The listener is only a repaint hint: a mouse move is the one input that
-    // does not otherwise dirty the window, and the hover styles are painted by
-    // whoever repaints next. The target itself is derived from the pointer in
-    // [`PointerWatch::prepaint`], so a stale listener state cannot leave a wash
-    // lit — at worst it costs one frame.
-    let element = element.on_hover(|_, _, cx| cx.refresh_windows());
+/// A faded control that can still take children.
+///
+/// A fade is a *wrapper*, so as a plain element it had to be the last call in a
+/// chain: every adopter had to move its `.child(…)` calls above it, which is
+/// why most hovering controls in the app were never converted. This type
+/// collects the children and attaches them when it becomes an element, so
+/// adoption is one line per site — see [`fade`].
+pub(crate) struct Hovered<T> {
+    element: T,
+    children: Vec<AnyElement>,
+    name: SharedString,
+    theme: Theme,
+    hover: Hover,
+}
 
-    // Paint the value on screen. The transition owns the clock, so the control
-    // needs no animation of its own; the watch asks for frames while it runs.
-    let value = Transitions::get(ElementId::Name(name.clone()))
-        .map(|transition| transition.value_at(Instant::now()))
-        .unwrap_or(0.0);
-    let (fill, ink) = hover.at(value);
-    let element = match ink {
-        Some(ink) => element.text_color(ink),
-        None => element,
-    };
-    let element = match fill {
-        Some(fill) => element.bg(fill),
-        None => element,
-    };
-    PointerWatch {
-        name,
-        pump: None,
-        theme,
-        role,
-        baked: value,
-        child: element.into_any_element(),
+// The interaction traits forward through their *one* required hook: every other
+// method (`on_click`, `on_mouse_up`, `on_hover`, `track_focus`, `key_context`, …)
+// has a default body that mutates `interactivity()` and returns `Self`, so a
+// `Hovered` hands out the inner element's interactivity and inherits them all.
+//
+// This is what lets a `ui/` component fade without changing what it returns:
+// callers keep chaining their handlers on the value a helper gives back.
+impl<T> InteractiveElement for Hovered<T>
+where
+    T: StatefulInteractiveElement + Styled + ParentElement + IntoElement + 'static,
+{
+    fn interactivity(&mut self) -> &mut Interactivity {
+        self.element.interactivity()
     }
-    .into_any_element()
+}
+
+// `Styled` is the same shape: one required hook (`style`) and everything the
+// macros generate — margins, padding, size, position, border, shadow, cursor —
+// is a default body that mutates it. So a `Hovered` hands out the inner
+// element's style memory and a chain can keep styling after the fade.
+impl<T> Styled for Hovered<T>
+where
+    T: StatefulInteractiveElement + Styled + ParentElement + IntoElement + 'static,
+{
+    fn style(&mut self) -> &mut StyleRefinement {
+        self.element.style()
+    }
+}
+
+impl<T> StatefulInteractiveElement for Hovered<T> where
+    T: StatefulInteractiveElement + Styled + ParentElement + IntoElement + 'static
+{
+}
+
+impl<T> ParentElement for Hovered<T>
+where
+    T: StatefulInteractiveElement + Styled + ParentElement + IntoElement + 'static,
+{
+    fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
+        self.children.extend(elements);
+    }
+}
+
+impl<T> IntoElement for Hovered<T>
+where
+    T: StatefulInteractiveElement + Styled + ParentElement + IntoElement + 'static,
+{
+    type Element = PointerWatch;
+
+    fn into_element(mut self) -> Self::Element {
+        // The role, named at every use: the guard in `scripts/check_motion.py`
+        // rejects a duration passed through a binding, so a reader can always
+        // see which band a surface is on.
+        let role = Motion::Interaction;
+        let hover = self.hover;
+        if !self.children.is_empty() {
+            self.element.extend(self.children);
+        }
+
+        if role.duration(&self.theme).is_zero() {
+            // Reduce Motion: the same treatment, applied on the frame the
+            // pointer arrives. `.hover` is a style closure, so this costs no
+            // state — and `PointerWatch::paint` leaves the registry alone, so
+            // no transition is ever created.
+            return PointerWatch {
+                tracked: false,
+                name: self.name,
+                pump: None,
+                theme: self.theme,
+                role,
+                baked: 0.0,
+                child: self
+                    .element
+                    .hover(move |style| {
+                        let (fill, ink) = hover.at(1.0);
+                        let style = match fill {
+                            Some(fill) => style.bg(fill),
+                            None => style,
+                        };
+                        match ink {
+                            Some(ink) => style.text_color(ink),
+                            None => style,
+                        }
+                    })
+                    .into_any_element(),
+            };
+        }
+
+        // The listener is only a repaint hint: a mouse move is the one input
+        // that does not otherwise dirty the window, and the hover styles are
+        // painted by whoever repaints next. The target itself is derived from
+        // the pointer in [`PointerWatch::prepaint`], so a stale listener state
+        // cannot leave a wash lit — at worst it costs one frame.
+        let element = self.element.on_hover(|_, _, cx| cx.refresh_windows());
+
+        // Paint the value on screen. The transition owns the clock, so the
+        // control needs no animation of its own; the watch asks for frames
+        // while it runs.
+        let value = hover_progress(self.name.clone());
+        let (fill, ink) = hover.at(value);
+        let element = match ink {
+            Some(ink) => element.text_color(ink),
+            None => element,
+        };
+        let element = match fill {
+            Some(fill) => element.bg(fill),
+            None => element,
+        };
+        PointerWatch {
+            tracked: true,
+            name: self.name,
+            pump: None,
+            theme: self.theme,
+            role,
+            baked: value,
+            child: element.into_any_element(),
+        }
+    }
 }
 
 /// Drives a control's fade from the pointer, one frame at a time.
@@ -250,7 +380,12 @@ where
 /// The wrapper is layout- and paint-transparent: it contributes the child's own
 /// layout id and delegates both phases, so nothing about the control's geometry
 /// or stacking changes.
-struct PointerWatch {
+pub(crate) struct PointerWatch {
+    /// Whether this watch drives a transition at all. False only for a fade
+    /// under Reduce Motion, where the child carries a plain `.hover` style and
+    /// there is no clock — so the registry must stay untouched, which is what
+    /// makes "no motion" observable as "no transition".
+    tracked: bool,
     /// The transition this element drives.
     name: SharedString,
     /// A caller-driven transition that has to keep its frames coming, so a fade
@@ -329,6 +464,10 @@ impl Element for PointerWatch {
         window: &mut Window,
         cx: &mut App,
     ) {
+        if !self.tracked {
+            self.child.paint(window, cx);
+            return;
+        }
         // A drag suppresses the wash, the same rule gpui applies to its own
         // hover styles: the pointer is carrying something, not browsing.
         let target = if hitbox.is_hovered(window) && !cx.has_active_drag() {
@@ -369,6 +508,51 @@ impl Element for PointerWatch {
 
         self.child.paint(window, cx);
     }
+}
+
+/// How far the hover fade named `parent` has run: 0 at rest, 1 hovered.
+///
+/// Zero for a name that has never been painted, which is also the answer under
+/// Reduce Motion, where a fade keeps no transition at all — see [`follow`].
+pub(crate) fn hover_progress(parent: impl Into<SharedString>) -> f32 {
+    Transitions::get(ElementId::Name(parent.into()))
+        .map(|transition| transition.value_at(Instant::now()))
+        .unwrap_or(0.0)
+}
+
+/// Reveal a child with its parent's hover: row actions that fade in with the
+/// row's wash rather than appearing on one frame.
+///
+/// `parent` is the name the parent's [`hover`] / [`fade`] was given. The child
+/// keeps no clock of its own — two transitions for one pointer would drift a
+/// frame apart — so it reads the parent's value as it is built, and the
+/// parent's watch already asks for frames while its fade runs. `shown` holds
+/// the child at full opacity regardless (the row's menu is open).
+///
+/// Reduce Motion leaves the parent with no transition to read, so the child
+/// falls back to gpui's `group_hover` on `group` (the parent's `.group(…)`
+/// name) and appears on the frame the pointer arrives — the same end state,
+/// without the fade.
+pub(crate) fn follow<T>(
+    element: T,
+    parent: impl Into<SharedString>,
+    group: impl Into<SharedString>,
+    theme: &Theme,
+    shown: bool,
+) -> T
+where
+    T: InteractiveElement + Styled,
+{
+    if shown {
+        return element.opacity(1.0);
+    }
+    // The parent's role, so both resolve Reduce Motion the same way.
+    if Motion::Interaction.duration(theme).is_zero() {
+        return element
+            .opacity(0.0)
+            .group_hover(group, |style| style.opacity(1.0));
+    }
+    element.opacity(hover_progress(parent))
 }
 
 /// A state-driven transition: the caller passes the value it wants now, and the
@@ -470,6 +654,9 @@ where
 
     let baked = hover.value_at(now);
     PointerWatch {
+        // A control records its pointer and selection targets even under Reduce
+        // Motion: the values land immediately, and a test can see that they did.
+        tracked: true,
         name,
         // The state fade is retargeted from the caller's value, so the watch has
         // to keep its frames coming too.
@@ -529,6 +716,65 @@ mod tests {
     /// test.
     fn frame(cx: &mut gpui::VisualTestContext) {
         cx.update(|window, cx| window.draw(cx).clear());
+    }
+
+    /// `fade` is the chainable form: the treatment wraps the element, and the
+    /// children added after it land inside the same box — which is what lets a
+    /// call site swap one style call for one wrap and keep its chain.
+    #[gpui::test]
+    fn a_fade_keeps_the_children_added_after_it(cx: &mut gpui::TestAppContext) {
+        use gpui::{div, point, px, size, AppContext as _};
+
+        struct Probe(Theme);
+
+        impl gpui::Render for Probe {
+            fn render(
+                &mut self,
+                _: &mut gpui::Window,
+                _: &mut gpui::Context<Self>,
+            ) -> impl IntoElement {
+                let theme = &self.0;
+                let shell = div()
+                    .id("fade-shell")
+                    .w(px(200.))
+                    .h(px(40.))
+                    .flex()
+                    .items_center()
+                    .debug_selector(|| "fade-shell".into());
+                fade(shell, "fade-children", theme, Hover::row(theme))
+                    .child(
+                        div()
+                            .w(px(80.))
+                            .h(px(20.))
+                            .debug_selector(|| "fade-child-a".into()),
+                    )
+                    .child(
+                        div()
+                            .w(px(40.))
+                            .h(px(20.))
+                            .debug_selector(|| "fade-child-b".into()),
+                    )
+            }
+        }
+
+        let theme = Theme::dark();
+        let cx = cx.add_empty_window();
+        cx.draw(point(px(0.), px(0.)), size(px(300.), px(200.)), |_, cx| {
+            cx.new(|_| Probe(theme))
+        });
+        let shell = cx.debug_bounds("fade-shell").expect("the control lays out");
+        let a = cx.debug_bounds("fade-child-a").expect("the first child");
+        let b = cx.debug_bounds("fade-child-b").expect("the second child");
+        assert_eq!(
+            shell.size,
+            size(px(200.), px(40.)),
+            "the control keeps its box"
+        );
+        assert!(
+            a.left() >= shell.left() && b.right() <= shell.right(),
+            "the children sit inside the faded control: {a:?} {b:?} in {shell:?}"
+        );
+        assert!(a.right() <= b.left(), "and in the order they were added");
     }
 
     #[test]
@@ -638,6 +884,48 @@ mod tests {
             (transition, changed)
         });
         assert!(!repeat);
+    }
+
+    /// A follower paints its parent's hover value: nothing of its own, so the
+    /// row's actions and the row's wash can never be a frame apart.
+    #[test]
+    fn a_follower_takes_its_parents_hover_value() {
+        let theme = Theme::dark();
+        let opacity = |parent: &'static str, shown: bool| {
+            let mut child = follow(div().id("follow-child"), parent, "follow-group", &theme, shown);
+            child.style().opacity
+        };
+        assert_eq!(opacity("follow-never-painted", false), Some(0.0));
+
+        let now = Instant::now();
+        Transitions::update("follow-rested", |_| (Transition::settled(0.0, now), ()));
+        Transitions::update("follow-hovered", |_| (Transition::settled(1.0, now), ()));
+        assert_eq!(opacity("follow-rested", false), Some(0.0));
+        assert_eq!(opacity("follow-hovered", false), Some(1.0));
+        assert_eq!(
+            opacity("follow-rested", true),
+            Some(1.0),
+            "an open menu holds the action lit"
+        );
+    }
+
+    /// Reduce Motion leaves the parent with no transition, so a follower must
+    /// not read one: it swaps through `group_hover` instead.
+    #[test]
+    fn a_follower_under_reduce_motion_ignores_the_registry() {
+        let mut theme = Theme::dark();
+        theme.ui.motion = crate::theme::MotionPreference::Reduced;
+        Transitions::update("follow-reduced", |_| {
+            (Transition::settled(1.0, Instant::now()), ())
+        });
+        let mut child = follow(
+            div().id("follow-reduced-child"),
+            "follow-reduced",
+            "follow-group",
+            &theme,
+            false,
+        );
+        assert_eq!(child.style().opacity, Some(0.0), "hidden until group hover");
     }
 
     /// Hovering writes a transition; a resting pointer does not restart it, and
@@ -797,7 +1085,9 @@ mod tests {
         let (_probe, cx) = cx.add_window_view(|_, _| Probe(theme));
         cx.simulate_mouse_move(point(px(300.), px(200.)), None, Modifiers::none());
         frame(cx);
-        let bounds = cx.debug_bounds("reduced-control").expect("control lays out");
+        let bounds = cx
+            .debug_bounds("reduced-control")
+            .expect("control lays out");
         cx.simulate_mouse_move(bounds.center(), None, Modifiers::none());
         frame(cx);
         let hover = Transitions::get("reduced-control").expect("hover is tracked");

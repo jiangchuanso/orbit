@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, "redesign/**"]
+    branches: [main]
   pull_request:
 
 permissions:
@@ -15,8 +15,8 @@ permissions:
 #
 # The "Protect Main Branch" ruleset requires one status check named `build`.
 # The matrix legs report `build (<os>)`, so the `build` fan-in job below is
-# what reports the required context — and it succeeds only when every
-# platform leg did.
+# what reports the required context — and it succeeds only when every job it
+# gates (the platform legs, the secret guard, the checks and the audit) did.
 jobs:
   check:
     name: build (${{ matrix.os }})
@@ -48,7 +48,7 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       # Zero warnings from `cargo build` is a stated project invariant
-      # (AGENT.md → Verification). Tests are no longer run in CI; run them
+      # (AGENTS.md → Verification). Tests are no longer run in CI; run them
       # locally with `cargo test --workspace`. The one exception is the
       # platform-specific clone/worktree modules below.
       - name: Build
@@ -93,22 +93,23 @@ jobs:
           fi
           echo "No committed key material"
 
-  # Translation completeness and the extension test suites. The design-system
-  # guards (scripts/check_states.py, check_motion.py, check_hovers.py,
-  # check_keyboard.py, check_ui_layers.py, check_ui_owners.py) are local tools
-  # only: the design changes often, so they do not gate CI. They need no Rust
-  # build, so this job runs in seconds on every push.
+  # Translation and locale-file checks, the UI layering and ownership guards,
+  # and the extension test suites. The other design-system guards
+  # (scripts/check_states.py, check_motion.py, check_hovers.py,
+  # check_keyboard.py) are local tools only: the design changes often, so
+  # they do not gate CI. Nothing here needs a Rust build, so this job runs in
+  # seconds on every push.
   checks:
     name: checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5
         with:
           python-version: "3.x"
 
-      - name: Translations cover every English key
+      - name: Translations cover every English key, and locale files match en.yml
         run: python3 scripts/check_i18n.py
 
       - name: The UI layer imports no surface
@@ -129,8 +130,9 @@ jobs:
 
   # Rust advisories, independent of GitHub's scheduled Dependabot sweep. This
   # is what caught quinn-proto, rustls-webpki and webpki-roots, none of which
-  # Dependabot reported. Blocking: the lockfile is clean. It tracks RustSec
-  # only — GHSA-38c5-483c-4qqp (grid) is not in that database.
+  # Dependabot reported. Blocking through the `build` fan-in: the lockfile is
+  # clean. It tracks RustSec only — GHSA-38c5-483c-4qqp (grid) is not in that
+  # database.
   audit:
     name: audit
     runs-on: ubuntu-latest
@@ -154,7 +156,9 @@ jobs:
   # reported"; the first step then turns a non-success into a red `build`.
   build:
     name: build
-    needs: [check, keyguard, checks]
+    # Listing a job in `needs` only orders it; each one is gated by its own
+    # step below, so every job named here must also be checked there.
+    needs: [check, keyguard, checks, audit]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -170,5 +174,17 @@ jobs:
           echo "::error::the secret guard did not pass: ${{ needs.keyguard.result }}"
           exit 1
 
-      - name: All platforms built
-        run: echo "macOS, Linux, and Windows builds passed"
+      - name: Require the translation, UI and extension checks
+        if: needs.checks.result != 'success'
+        run: |
+          echo "::error::the checks job did not pass: ${{ needs.checks.result }}"
+          exit 1
+
+      - name: Require a clean dependency audit
+        if: needs.audit.result != 'success'
+        run: |
+          echo "::error::cargo audit did not pass: ${{ needs.audit.result }}"
+          exit 1
+
+      - name: All required jobs passed
+        run: echo "Builds, secret guard, checks and audit passed"

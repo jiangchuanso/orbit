@@ -441,13 +441,13 @@ impl ChipButton {
                 }),
             ChipStyle::Outlined { inset } => {
                 let face = if open {
-                    theme.surface_active
+                    theme.pressed_wash()
                 } else if marked {
-                    theme.surface_selected
+                    theme.selected_wash()
                 } else if inset {
-                    theme.background
+                    theme.control_inset(theme.background)
                 } else {
-                    theme.surface_elevated
+                    theme.control_face(theme.surface_elevated)
                 };
                 let el = el
                     .border_1()
@@ -740,7 +740,11 @@ impl FileChip {
         let mut chip = button_frame(div().id(self.id), theme, ButtonSize::Medium)
             .border_1()
             .border_color(theme.hairline())
-            .raised(self.face.unwrap_or(theme.surface_elevated), theme);
+            .raised(
+                self.face
+                    .unwrap_or_else(|| theme.control_face(theme.surface_elevated)),
+                theme,
+            );
         if interactive {
             chip = chip.hover_border(theme);
         }

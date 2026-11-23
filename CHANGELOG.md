@@ -7,6 +7,301 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.21] - 2026-11-24
+
+- **Decision cards lay their options out on a line again.** The inline "Decision needed"
+card (an extension's `select`, such as *Finish review*) and the questionnaire panel share
+`ChoiceRow`, whose label sat in a wrapping flex row with an auto basis and `min_w_0`. That
+let the label shrink to zero width, so every option painted one glyph per line ("R / e / t /
+u / r / n…") down a tall empty row. The label now takes the line's remaining width and wraps
+inside it, and the Recommended badge keeps its own width beside the first line. Covered by a
+layout test of the card's own container chain.
+
+- **The changed-files summary reads as a card again.** The end-of-task "Changed N files"
+summary with its Review button was the only transcript card on its own fill: a
+`surface_secondary` well at the wallpaper's card opacity, with no edge. In dark palettes
+that landed a shade *below* the canvas (measured 1.02:1, under the design system's 1.045:1
+visible step), so the card sank into the background. It now sits on the same inspector
+material as the tool, thought and delegation cards beside it (`frosted_transcript_fill`):
+contrast-floored over glass, the page-glass ink lift over a full-window wallpaper, and the
+`overlay` plate where it is opaque.
+
+- **Markdown images show inline.** An image in a GitHub issue or pull request body, or
+in an agent's reply, used to render as an `image · Open` card that only handed the URL to
+the browser. It now loads inline through GPUI's image cache and the same bounded HTTPS
+client avatars use (5 s connect / 15 s total timeouts, 5 redirects, an 8 MiB cap), and
+lays out at its own width — narrowed to the column and to a 30 rem height — with its
+aspect ratio kept; clicking it opens it in the browser. A skeleton bar holds its place
+while it loads, and an image that cannot load (a private attachment, a dead link, a
+plain `http://` URL) falls back to the alt text and **Open**. `file://` and `data:`
+images still never load, and a host that resolves to a private, loopback or
+link-local address is refused. This reverses the earlier rule that remote
+Markdown images are never fetched: `PRIVACY.md` now says what an image host
+can see.
+
+- **Keycaps centre their marks.** The `↵ Queue` / `⌥ ↵ Steer` hints, the sidebar's `⌘1`…
+slots, the palette hint and the working-folder key legend drew `↵`, `⌥`, `⌘`, `⌃` and `⇧`
+as text, each from whichever font covered it and at that font's own height; text layout
+centres the line box rather than the ink, so `↵` rode about 1.5px above the middle of its
+cap and above the `⌥` beside it. `kbd_key` now draws those marks with the bundled Symbols
+Nerd Font's keyboard icons, which sit on the middle of the em box. Words and letters
+(`Esc`, `Tab`, `Enter`, `B`) stay text, and the caps keep their size.
+
+- **The Subagents save button only lights up when there is something to save.** The page's
+one primary button read “Create override” whether or not the form had been touched, so
+editing a built-in (`reviewer`, `scout`, `worker`) showed an unsaved marker and no save,
+while a reopened agent offered a Save that wrote the same bytes back; the sentence
+explaining that saving a built-in writes an override sat in the File section below the
+fold. The button is now **Save** for anything with a file or a built-in behind it and
+**Create** for a draft, disabled until the form differs from what was loaded, with the
+override path in its tooltip while it is still disabled. A built-in renamed before its
+first save still says Create, because that writes a new agent rather than an override.
+
+- **Leaving Subagents with unsaved edits says where the click was going.** Clicking
+another section in the settings nav while an agent form had unsaved changes held the
+navigation and asked “Discard unsaved changes to scout?”, which never named the
+section, so the click looked dropped and the pane looked stuck; the nav cursor also
+moved to the refused row, leaving the keyboard out of step with the page on screen.
+The question now ends in *and open Providers & models?*, and the cursor stays on the
+section that is actually open until the edits are discarded.
+
+- **Two-line rows hold their caption closer to the title.** Every picker row with a
+secondary line (the model and thinking pickers, Work in, the folder picker, worktrees,
+remote hosts, the access and workflow menus, Usage filters and the palette's empty
+state) stacked its title and caption on the `Comfortable` 1.618× leading, which put
+about 8px of air between the two lines; the access and workflow menus added 2px more.
+They now stack on one token, `picker::STACK_LEADING` (`Standard`, 1.3×), with no extra
+margin, so a two-line row is 42px instead of 50px at the default size. One-line rows,
+trailing title slots and leading marks stay aligned to the title's line, and the
+row-height token they are all measured from changed with them.
+
+- **The model and thinking pickers open wholly above their chip.** In a short window the
+model picker's six-row list was taller than the room above the composer, and gpui's
+`anchored` answers a menu that does not fit by snapping it back into the window, so the
+picker slid down over its own chip and the click meant to close it landed on the picker.
+The composer now records the chip row's top edge as it lays out, and the picker caps its
+height to the room above it (less the menu gap and the window margin). Only the list gives
+way and scrolls; the search, tabs and footer keep their size, and keyboard navigation
+scrolls against the list's painted height. A cramped window still keeps a few rows.
+
+- **Tabs and sidebar row actions fade too.** Every tab — the terminal's, the right dock's
+and the Git page's — swapped its hover on one frame, because `ui/tab.rs` painted it with a
+plain `.hover` style. The tab now fades through `motion::fade`, with the same wash and the
+same muted-to-secondary ink, and callers still chain `on_click`, tooltips and debug
+selectors after `render`. A sidebar project header's `…` and `+` actions were revealed by
+`group_hover`, so they popped in while the header's wash faded. They now follow the
+header's own hover transition (`motion::follow`): no second clock, so the actions and the
+wash cannot drift a frame apart. An open header menu still holds its `…` lit, and Reduce
+Motion falls back to the one-frame reveal.
+
+- **Hovers fade across the component layer.** `motion::fade` wraps a control and still accepts
+everything a chain does after it — styling, handlers, children — because gpui's `Styled`,
+`InteractiveElement` and `StatefulInteractiveElement` each have one required hook and several
+hundred default methods built on it. So the components could adopt it without changing a
+single call site: every `Button` and `IconButton` (about 260 call sites), every Explorer and
+review tree row, the flat top-bar controls, and the transcript's three block toggles now
+cross-fade their fill and ink instead of swapping on one frame. Variants whose hover changes
+more than a fill (Tinted, Danger, Destructive, Glass) keep the one-frame swap, because their
+hover is not a fill.
+
+- **A hover fade can take children now.** A fade has to wrap the element it fades, which made
+it the last call in a chain: every call site had to move its `.child(…)` calls above it, and
+that is why most hovering controls in the app still swap on one frame. `motion::fade` collects
+the children instead, so a site converts by wrapping its chain — the transcript's code-block
+fold, its diagram-source toggle and its changed-files toggle are the first. `motion::hover` is
+the same implementation as a leaf, so its existing adopters are unchanged.
+
+- **The session preview can be read without a mouse.** The card is the only place the
+sidebar shows a session's full path and provider list, and it can be taller than the
+window — but its overflow was pointer-only, so a keyboard reader could never reach the
+end of it. Page Up / Page Down now page the card while it is showing (the pointer's, or
+the one the keyboard cursor paints), stopping at both ends. It scrolls the same handle
+the wheel does, and a dismissed card opens at the top again.
+
+- **The About page's header no longer pushes its board off the screen.** The identity
+block put its text column in a row without letting it grow, so the column was sized to
+its max-content — for a nested flex column, the 98px title. The subtitle wrapped to five
+lines and the version line to three, the header grew to roughly 1,500px, and the board
+(updates, runtime, source) began about 1,600px down a 640px-tall window's scroll area;
+the mark also had no definite box, so its width came from the decoded asset and the row
+reflowed when it arrived. The column now takes the row's remaining width, and the mark is
+a 48px box. Every other Settings page was unaffected, because there the same column sits
+in a column parent, where a flex item stretches.
+
+- **Panels slide instead of snapping.** The sessions sidebar, Review (and a subagent
+tab), the Explorer, session details and the bottom terminal strip now ease their own
+extent when they open or close — a width for the docks, a height for the terminal — and
+the space beside or above them is given back on the same curve. The sidebar's slide was
+hand-rolled on a counter bumped by the toggle, which could not be interrupted: closing
+and reopening quickly restarted it from the end. All of them now share one primitive
+(`motion::panel::slide`) built on the motion layer's retargetable `Transition`, so a
+panel caught mid-slide resumes from the extent on screen. A closing panel stays mounted
+for the slide and leaves the tree once it has arrived, so a closed dock still costs
+nothing; the sessions sidebar stays mounted while closed because its focus handle has to
+be in the tree for ⌘⇧B. The terminal was the case that had never had a chance to
+animate: its strip was gated on "visible", which folded in its open flag, so closing it
+unmounted the row on the same frame. The top bar's leading pad and the titlebar controls
+ride the same clock as the sidebar's edge rather than animating their own. Reduce Motion
+takes the end state on the frame it changes. The Git page still snaps: it replaces the
+whole column rather than sitting beside it, so it needs a page entrance, not a width.
+
+- **Pages and Settings sections arrive instead of appearing.** Opening Git, Usage, Files,
+Worktrees, an expanded terminal or any Settings section now fades its content in
+(`motion::arrive`, on the layout role) instead of replacing the previous one on a single
+frame. Only the content fades, over the card's own canvas — the card, its gutter and the
+Settings nav never move — so nothing flashes the wallpaper through the swap, and the page
+never travels: an offset would reflow the page under the reader's cursor for a picture
+that was already gone. The destination, not the moment, names the entrance, so swapping
+between two pages never inherits the other's finished fade, and typing in Settings →
+Search does not re-fade on every keystroke. A right-dock tab switch stays instant: it
+swaps between transcripts, and the transcript takes no entry animation. Reduce Motion
+paints the page opaque on the frame it opens.
+
+- **Spelling marks in the prompt composer.** Misspelled words in the composer
+  get a wavy underline once you pause typing, drawn the way a native text view
+  draws them. Orbit paints its own text, so macOS never spell-checked it; the
+  new `spellcheck` module asks `NSSpellChecker` for the misspelled words and
+  marks only prose — fenced and inline code, paths, identifiers, commands and
+  `@`-mentions are skipped, and the run lengths are untouched so the caret,
+  selection and wrapping never move. There is no auto-correction and no grammar
+  checking (a prompt is imperatives and code, which Apple's grammar checker
+  flags even when it is right). Right-click a marked word for the checker's
+  suggestions (up to five, best first) and **Learn spelling** to add it to the
+  macOS dictionary; the menu opens only on a marked word, so the squiggle and
+  the menu never disagree. Settings → Agent → Check spelling turns it off.
+  macOS only — Windows and Linux have no checker in this stack.
+
+- **Clearer session previews.** Sidebar hover and keyboard preview cards group
+  the title, location and providers, give branch/divergence their own row, show
+  paths in monospace, align metadata icons/text, and separate the shortcut hint into
+  a quiet footer. Viewport-bounded scrolling keeps full paths, branches and all
+  provider/model labels readable without truncation; a short pointer handoff grace
+  allows entering the popup to scroll. The keyboard preview route is retained.
+
+- **Search within a provider's models.** Each expanded Models section has its
+  own search field for model ids and names. It keeps your query when collapsed;
+  Show all / Hide all still apply to the whole section, not just search results.
+
+- **Git activity at a glance.** The Git button at the bottom of the sidebar
+  shows a dot when you have changed files, or when new issues or pull requests
+  were opened on GitHub since you last looked; hover it to see which. On the
+  Git page, the Changes tab shows how many files changed, and Issues and Pull
+  requests show how many are new until you open them. The GitHub check uses
+  your signed-in `gh`, runs every 5 minutes and when the window comes forward,
+  ignores items you opened yourself, and can be turned off in Settings →
+  Privacy → GitHub.
+- **Maximized window reopens maximized.** A window you closed while
+  maximized could reopen a little short of the screen and no longer
+  maximized. Orbit now waits for the maximize animation to finish before
+  remembering the window's size, so the size to restore to is the one you
+  had before maximizing.
+- **Tighter workbench cards with clean corners.** The Files, Git, Usage and
+  Worktrees pages and the Explorer, Review and Session details docks now sit
+  6px apart (down from 12px), and keep the same 6px from the window's right
+  and bottom edges instead of running into the window's own rounded corner.
+  A file or page no longer paints its last lines through the card's bottom
+  corners and edge, and every card's outline stays visible at all four
+  corners.
+- **Even file tab header.** An open file's tab now sits centred in its strip
+  at every UI size, the same distance from the top and left of the card, and
+  the close button matches the tab's height. The file name, the path below it
+  and the size/lines/Saved details now line up on one left and one right edge.
+- **New Session details icon.** The top-bar button that opens Session details
+  now shows a list icon instead of the info "i", which stays in use for
+  notices and About.
+- **Centred Jump to latest arrow.** The arrow in the round "Jump to latest"
+  button now sits exactly in the middle of its circle; it used to be pulled
+  1px up and to the left.
+- **Cleaner Explorer panel.** The project panel now keeps a minimum width of
+  260px (up from 220px) and opens at 280px, so the workspace name and nested
+  file names stay readable. Long file and folder names end in "…" instead of
+  being cut off, and hovering a row shows its full path. The filter box now
+  lines up with the file tree. When a filter matches nothing, the panel says
+  so instead of claiming the workspace has no files.
+- **No focus rings.** Buttons, chips, rows, fields, switches, Settings, the
+  Explorer tree and transcript disclosures no longer draw a highlighted ring
+  when they have keyboard focus. Tab, the arrow keys, Enter and Space still
+  work as before; nothing moves or changes size.
+- **Project icons without a box.** Sidebar project icons and logos now show
+  on their own, with no tile or outline behind them. Icons keep the same size,
+  so project names still line up.
+- **Animated wallpaper effects.** Every wallpaper effect now moves like the
+  new-session background: the same drifting pattern, Orbit monogram and
+  sweeping light play over your picture in the effect's own style. Dither
+  grain flows, halftone dots swell and shrink, ASCII characters change, and
+  scanlines thicken and thin in place (they no longer roll, which made the
+  screen flicker). The effect's pixel size applies, and Reduce
+  Motion keeps it still.
+- **Lighter background animation.** The new-session background and animated
+  wallpaper now update 10 times a second instead of 30, which looks the same
+  because the pattern drifts slowly. They pause while Orbit is in the
+  background, and a wallpaper stays still behind chats, Settings and other
+  pages, so the CPU and GPU do far less work.
+- **Transcript cards are frosted glass again over a full-window background.**
+  Tool, thought and subagent cards, a tool call's Arguments and Output area,
+  code blocks and the composer now use the same frosted material as the
+  sidebar. Before,
+  each painted another near-opaque tint over the already-tinted chat column,
+  so the frost behind it was almost hidden and an open tool card looked like a
+  dark slab next to a subagent card. Code areas still get just enough extra
+  tint to keep their text readable.
+- **Buttons, chips and fields are frosted glass too.** Over a background (and
+  in dark menus and dialogs), secondary, outline and danger buttons, outlined
+  and file chips, segmented controls, icon tiles and text fields (including
+  the Git page's Sync button, the composer's stop button and the subagent
+  limit stepper, and every text field built on the shared field frame such as
+  Settings → Plugins' install field) now show the
+  frost through a light glass face instead of a solid dark one. Hover, open and
+  selected states are lighter glass steps. Primary, accent and red delete
+  buttons stay solid so they still stand out.
+- **New switch style.** Every settings switch now uses a rounded-rectangle
+  track with a rounded-square knob that slides across; it turns green when
+  on. The design is adapted from RaspberryBee's Uiverse.io switch (MIT).
+- **New loading spinner.** Loading indicators, including the spinner on a
+  running task in the sidebar, are now one style: a faint full ring with a
+  short arc turning on top.
+- **Sidebar projects, easier to read and manage** (#166). The Projects label,
+  project names and project icons are larger. A project's ⋯ menu has
+  **Rename…**: the new name shows in the sidebar only, and the folder on disk
+  is never renamed (leave the field empty to go back to the folder name).
+  **New session** and **New project** now have their own row under search:
+  a small **New project** button on the left and a wide **New session** button
+  on the right. The search row keeps only search and the view menu.
+- **Delete the open task** (#166). **Delete session…** now works on the task
+  you have open: Orbit opens a new task, stops the old task's pi process, then
+  deletes the file. It stays disabled only while a run is in progress. The
+  command palette's Delete Session uses the same safe path.
+- **Branch from a message…** (#166) in a task's menu opens the message picker
+  for that task, so you can start a new task from any earlier turn.
+- **Work in picker, reorganised** (#166). The new-task page's **Work in**
+  picker now has two labelled sections instead of hairlines: **This device**
+  (current checkout, New worktree, Existing worktrees) and **Remote** (your
+  SSH hosts, Add this project to a server…, and a new **Add remote host…**
+  row). Remote is always there, even before you set up a host: Add remote
+  host… opens Settings → Remote hosts with the form ready. The Experimental tag
+  now sits once on the Remote label instead of on every host.
+- **Cleaner command cards.** An open command card shows its command once:
+  the header no longer repeats a cut-off copy, and the command block drops
+  its "Command" label (the `$` already says it). Output keeps one line per
+  row and scrolls sideways instead of wrapping into a ragged block, and
+  `file:line:` locations from grep, rg or a compiler are dimmed so the
+  matched text stands out.
+- **Inline code looks like a chip** (#168). Code in answers and thinking
+  (`origin/main`, `npm run build`) now has rounded 4px corners, a little space
+  on each side, and a background fitted to the text instead of a hard
+  rectangle as tall as the line. It keeps the same colour in every theme.
+  Selected text still highlights as a plain block.
+- **Stop matches Send.** The composer's Stop button now shows a small filled
+  square instead of a full circle with a square cut out. The old mark filled its
+  whole icon box and looked like a bigger, heavier circle inside the round
+  button, so Stop read larger than Send even though both are 28px.
+- **Corner rounding setting removed.** Settings → Appearance no longer has a
+  Corner rounding control; Orbit's corners are fixed at their standard sizes.
+  A value saved by an earlier version is ignored.
+- **First launch no longer uses Orbit's own folder as the project** (#166). A
+  launch from the Dock, Start menu or a shortcut with no remembered folder now
+  starts in your home folder instead of the install directory (Windows) or `/`.
+
 - **Frosted code blocks.** Code blocks and Mermaid diagrams in answers now
   use the same frosted glass as tool cards over a wallpaper (and in dark
   themes), with the code well's contrast-floored tint so code stays readable.
@@ -102,6 +397,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The Git page's commit bar matches the working tree.** With nothing to
+  commit, the bar is no longer an empty "leave blank to generate" message box
+  with "Up to date" tucked into its corner: it is one row that leads with the
+  sync status (up to date, behind, diverged) and trails with Push, Pull or
+  Merge when one applies. The message editor comes back as soon as there is a
+  change to commit. The tab strip is taller, so the selected tab no longer
+  sits against the page card's rounded top corner.
 - **Security boundaries are enforced end to end.** Opening a workspace no longer
   silently grants project trust: unknown or denied workspaces use `--no-approve`,
   keep project resources and MCP secrets off, and require an explicit persisted
@@ -2705,7 +3007,7 @@ not asked on every turn.
 - In-transcript find (⌘F) and a full-window image lightbox.
 - Native macOS app bundle, Developer-ID signed and notarizable.
 
-[Unreleased]: https://github.com/imrj05/orbit/compare/v0.2.20...HEAD
+[Unreleased]: https://github.com/imrj05/orbit/compare/v0.2.21...HEAD
 [0.0.1]: https://github.com/imrj05/orbit/releases/tag/v0.0.1
 [0.0.2]: https://github.com/imrj05/orbit/releases/tag/v0.0.2
 [0.0.3]: https://github.com/imrj05/orbit/releases/tag/v0.0.3
@@ -2746,3 +3048,4 @@ not asked on every turn.
 [0.2.18]: https://github.com/imrj05/orbit/releases/tag/v0.2.18
 [0.2.19]: https://github.com/imrj05/orbit/releases/tag/v0.2.19
 [0.2.20]: https://github.com/imrj05/orbit/releases/tag/v0.2.20
+[0.2.21]: https://github.com/imrj05/orbit/releases/tag/v0.2.21

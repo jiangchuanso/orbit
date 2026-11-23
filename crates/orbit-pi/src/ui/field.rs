@@ -19,7 +19,12 @@ use gpui::{
 /// `ComposerInput` inside inherits. Callers set the fill (and a focus border)
 /// and give the input a `flex_1` wrapper when an icon shares the row.
 pub(crate) fn input_field_frame<E: Styled>(el: E, theme: &Theme) -> E {
-    el.min_h(input::min_height(theme))
+    // The field's own recessed face: the palette's `background` on an opaque
+    // surface, a faint glass well on glass (`Theme::control_inset`), so a
+    // field never sits on frost as a solid hole. A caller that needs another
+    // fill sets it after this and routes it through `control_inset` too.
+    el.bg(theme.control_inset(theme.background))
+        .min_h(input::min_height(theme))
         .px(input::padding_x(theme))
         .py(input::padding_y(theme))
         .flex()
@@ -103,7 +108,7 @@ impl TextField {
         let frame = input_field_frame(div(), theme)
             .w_full()
             .min_w_0()
-            .bg(self.fill);
+            .bg(theme.control_inset(self.fill));
         match self.min_h {
             None => frame.child(div().flex_1().min_w_0().child(self.input)),
             Some(min_h) => {
@@ -242,5 +247,40 @@ mod tests {
             "floor is one line"
         );
         assert_eq!(one_line.background, Some(theme.background.into()));
+    }
+
+    /// The shared frame owns the field's face, so a field built on it is a
+    /// glass well on glass and the palette's `background` everywhere else —
+    /// and no surface paints that face again as an opaque slab.
+    #[test]
+    fn the_field_frame_is_a_glass_well_on_glass() {
+        use crate::theme::SurfaceTreatment;
+        let base = Theme::dark();
+        let glass = base.with_wallpaper(SurfaceTreatment {
+            active: true,
+            ..SurfaceTreatment::OPAQUE
+        });
+        for theme in [base, glass] {
+            let mut field = input_field_frame(div(), &theme);
+            assert_eq!(
+                field.style().background,
+                Some(theme.control_inset(theme.background).into())
+            );
+        }
+        assert!(glass.control_inset(glass.background).a < 0.5);
+        for (name, source) in [
+            ("settings", include_str!("../app/settings.rs")),
+            ("mcp", include_str!("../app/mcp_ui.rs")),
+            ("view", include_str!("../app/view.rs")),
+            ("session", include_str!("../app/session.rs")),
+        ] {
+            for (ix, _) in source.match_indices("input_field_frame(div(), &theme)") {
+                let window = &source[ix..(ix + 900).min(source.len())];
+                assert!(
+                    !window.contains(".bg(theme.background)"),
+                    "{name} repaints a field's face opaque"
+                );
+            }
+        }
     }
 }

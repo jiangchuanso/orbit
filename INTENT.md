@@ -132,18 +132,25 @@ hook re-arms a live session with no restart.
 
 **Residual:** this is a guard, not a sandbox (pi ships none).
 
-### D9 — Localization: `en.yml` is the only hand-edited locale
+### D9 — Localization: `en.yml` owns the keys, each locale file owns its translations
 **Choice:** all user-facing copy goes through the crate-root `tr!` / `tr_cow!` macros
-(`crates/orbit-pi/src/i18n.rs`). `locales/en.yml` is the source of truth; the other nine locale
-files are generated from the `scripts/i18n_glossary*.py` tables by `scripts/gen_locales.py`, and
-`cargo test -p orbit-pi i18n` guards completeness. Ships English, 简体中文, 日本語, 한국어,
+(`crates/orbit-pi/src/i18n.rs`). `locales/en.yml` is the source of truth for keys, their order and
+placeholders; each of the other nine locale files is hand-edited and holds that language's
+translations. `scripts/check_i18n.py` fails on a locale that is missing a key, keeps a stale one,
+drifts from `en.yml`'s order or drops a placeholder, and `--sync` brings every locale in line
+(new keys arrive in English, to be translated); `cargo test -p orbit-pi i18n` guards completeness.
+*Revised:* translations used to live in sixty `scripts/i18n_glossary*.py` tables keyed by the
+English text and were generated into the locale files. That stored every translation twice, let a
+later table silently override an earlier one (91 conflicts), and tied one translation to every key
+sharing an English string; the locale files are now the only copy. Ships English, 简体中文, 日本語, 한국어,
 Español, Français, Deutsch, Português do Brasil, Русский, Italiano — plus `System`, which walks
 the OS preferred-language list and picks the first shipped language.
-**Rationale:** ten hand-maintained locale files drift; generated files with an English fallback
-and a completeness test keep them honest without blocking releases. Long-lived fields resolve
+**Rationale:** ten hand-maintained locale files drift unless something checks them; a guard that
+compares each file to `en.yml` (keys, order, placeholders) plus an untranslated-string baseline
+keeps them honest without blocking releases, and with one copy of each translation. Long-lived fields resolve
 placeholders from keys at paint time, so a language change is live (including the native menu
-bar) without rebuilding them. **Consequence:** new copy adds an `en.yml` key and a glossary
-entry — hard-coded English in a render path is a bug.
+bar) without rebuilding them. **Consequence:** new copy adds an `en.yml` key, a `--sync`, and a
+translation in each locale file — hard-coded English in a render path is a bug.
 
 ### D10 — Provider quota: a bundled extension bridge over pi's own credentials
 **Choice:** account usage (quota / balance / spend) is read by the bundled
@@ -183,7 +190,7 @@ dialog, and the custom-UI card) via `elevation_3` and the `modal` metrics; the l
 `popover_shadow` is gone. Sidebar session / workspace rows use Zed's list-item radius and the
 `TextSize` / `DynamicSpacing` scales, as do the transcript's message rows, user bubbles, tool /
 question card shells, error strips, the usage footer, and the settings section / group / row
-chrome and keycap chips. The sidebar's New Task / Search / Usage controls share one
+chrome and keycap chips. The sidebar's Search / Usage controls share one
 `button_frame(ButtonSize::Large)`. The ad-hoc `Theme::space` (density-only) helper is gone: every spacing
 site now resolves through `DynamicSpacing`, so chrome tracks the UI font size as well as
 density. UI type is on the `TextSize` scale across every surface (471 of 517 `.text_size` sites);
@@ -525,8 +532,10 @@ same trusted workspace. Cross-workspace children use `--no-approve`, drop the ex
 secret-name set, and re-apply Orbit-owned guardrail variables after secret removal. Plan/Ask
 use conservative per-utility shell policies and default-deny MCP, custom, and orchestration
 tools; invalid workflow evidence falls through to the session branch instead of becoming
-Build. Remote Markdown images are passive browser links rather than automatic requests;
-the remaining avatar client uses HTTPS, timeouts, bounded redirects, and an 8 MiB body cap.
+Build. Remote Markdown images load inline through the same bounded client avatars use
+(HTTPS only, timeouts, bounded redirects, an 8 MiB body cap); this revises the earlier
+passive-link rule at the user's request (2026-11-23), and `PRIVACY.md` says what an image
+host can see.
 Updater verification consumes the same open file it verified, scratch directories are
 owner-only, feed/error writes are bounded and non-following, clone URLs lose userinfo and
 query credentials, and quota adapters require exact official HTTPS origins.
@@ -582,9 +591,73 @@ legacy app today:
 
 ### Implementation status (living)
 
+The prompt composer marks misspelled words with the wavy underline a native text
+view draws, once typing pauses. Orbit paints its own text, so AppKit never
+spell-checked it: `spellcheck.rs` splits a draft into prose runs (fenced and
+inline code, paths, identifiers, commands, `@`-mentions and URLs break a run and
+are never checked) and asks `NSSpellChecker` for the misspelled words in them,
+which `composer.rs` paints as a per-run wavy underline — a paint channel only,
+so the caret, selection and wrap points do not move. The check is debounced
+350 ms from `render` (every edit path reaches it through the composer's
+`revision`) and gated on `spellcheck::start()`, so a unit test never calls
+main-thread AppKit; stale marks are clamped to character boundaries between an
+edit and the next check. No auto-correction and no grammar checking on purpose.
+A right-click on a marked word opens a context menu at the pointer with up to
+five of `NSSpellChecker`'s suggestions (best first) and **Learn spelling**, which
+writes the word to the user's own macOS dictionary and re-checks so the mark it
+came from goes away. Only a *marked* word opens it — the squiggle is the promise
+that the word was checked — and the caret does not move under an open menu. The
+rows act on release rather than `on_click`: they are deferred children of the
+composer, where the press→release pairing does not survive the frame the press
+itself triggers (measured in the test below). Settings → Agent → Check spelling
+(default on) is the switch, stored in `ui.json`; the row appears only on macOS
+because the other platforms have no checker in this stack. Unit tests cover the
+prose/exclusion rules, the UTF-16 to byte mapping, the clamp and the
+"only a marked word" rule; composer tests prove the mark pass preserves the
+covered length, that a suggestion replaces exactly the marked word, and — with a
+real layout, a right-click and a release on a row — that the menu paints at the
+pointer and applies the choice. GPUI tests cover the switch's platform presence
+and the gate; the AppKit round trip in the running app is not yet verified by
+hand.
+
+The sidebar's Git button carries a dot when there is something to look at, and
+its tooltip names what: changed files in the working tree, and issues or pull
+requests opened on GitHub since the user last viewed that tab. The Git page's
+Changes tab shows its changed-file count, and Issues / Pull requests show their
+new counts until opened (the shared `Tab` gained a quiet count badge, capped at
+99+). Local changes are counted on the branch fetch the workspace watcher
+already runs, so they cost no network. The GitHub half (`git_activity.rs`,
+`app/git_activity_ui.rs`) asks `gh` for two fields of the open lists every five
+minutes and on window activation (no more than once a minute), skips the
+user's own items, baselines a repository the first time it is seen so the
+backlog never reads as new, and keys what was seen by `owner/name` in
+`~/.orbit-pi/git-activity.json`. GitHub has no unread state, so "new" is
+"opened after the last view"; Settings → Privacy turns the check off. Covered
+by unit tests for the counting, baseline and store, and app tests for the dot,
+its tooltip and marking a tab seen; the live `gh` round trip and the dot in the
+running app are not yet verified by hand.
+
+Markdown images render inline (`transcript_view::render_markdown_image`): an HTTPS
+image loads through GPUI's image cache and the bounded `http.rs` client, records its
+decoded size, and lays out at its own width narrowed to the column and to a 30 rem
+height, keeping its aspect ratio; a click opens it in the browser. While it loads a
+skeleton bar holds its place; a failed load (a private attachment, a dead link, a
+plain `http://` URL) falls back to the alt text and an **Open** action. `file://` and
+`data:` images never load. This revises the earlier passive-image rule; PDF export
+still omits remote images. Covered by layout tests for inline, wide, quoted and
+failing images; not yet verified by hand in the running app.
+
 The shared tooltip fades in on the interaction motion role; persistent update
 notice actions and their close control use the retargetable hover treatment.
 Reduce Motion presents their final appearance immediately.
+
+Tabs (terminal, right dock, Git page) fade their resting hover through
+`motion::fade` from the one `ui/tab.rs` owner. A sidebar project header's `…`
+and `+` actions fade in with the header's own wash through `motion::follow`,
+which reads the parent's hover transition instead of keeping a second clock;
+under Reduce Motion they fall back to `group_hover` and appear on one frame.
+Covered by motion and tab unit tests; the fade in the running app is not yet
+verified by hand.
 
 Project trust (D23) now gates every local, remote, MCP, plugin, and delegated pi
 spawn. Unknown workspaces run restricted with no project resources or MCP secrets;
@@ -609,7 +682,7 @@ boards can frost the workbench without wallpaper, while full-window wallpaper
 and accessibility preferences continue to control the fallback.
 
 The shared workbench geometry uses 6px compact controls and rows, 9px standard
-controls, 12px cards and 16px dialogs before the rounding preference. Floating surfaces use
+controls, 12px cards and 16px dialogs (fixed; the Corner rounding setting was removed in #166). Floating surfaces use
 soft shadows alongside their existing contrast-controlled frost and opaque
 fallbacks; the semantic palette roles remain unchanged.
 
@@ -686,6 +759,33 @@ image blur, and a bottom fade. The separate **Bottom fade** preference works in
 both Hero and Full window placements and blends into the live theme canvas at
 paint time, without modifying the source image or changing wallpaper defaults.
 
+A wallpaper with any artwork effect on (Dither, Halftone, ASCII or Scanlines,
+at any strength, Hero or Full window) carries the new-task page's living
+field: `backdrop::overlay` paints the same drifting tone, screened monogram
+and sweeping light on a clear plane over the treated picture, at the picture's
+own image opacity, printed through the effect's own `backdrop::Screen` —
+ordered dither, halftone dots whose area is the tone, the ASCII ramp shared
+with `wallpaper_fx`, or fixed scanlines whose thickness follows the tone
+(they once rolled downward, which turned over a third of the plane per frame
+and strobed; `no_screen_flickers_between_frames` now holds every screen under
+3 % per frame) — at the effect's pixel size. It shares the
+backdrop's clock and raster-ahead cache, and moves only on the new-task page
+in a frontmost window; behind a chat, Settings or a feature page it holds the
+frame it was showing, and Reduce Motion freezes it. The Settings preview shows
+it at rest.
+
+The field is deliberately light. It runs at 10 Hz, not 30: the field drifts so
+slowly that at 30 Hz consecutive frames differed in 0.01–0.03 % of their pixels,
+while each frame paid for a full raster, a texture upload and a whole-window
+repaint with every frosted pane's backdrop blur. Both the new-task backdrop and
+the wallpaper field also stop whenever the window is in the background
+(`OrbitApp::tick_backdrop` reads `window_active`), dropping their clock and
+asking for no repaint, and resume from the frame they held. Covered by unit
+tests for the clear raster, every screen, which settings animate, the 10 Hz
+beat and the background pause (each screen rasters within the cost of the
+original dither); a manual pass in the
+running app, including frame cost behind frosted panes, is still outstanding.
+
 The component layer (D22) is complete: every element family has one owner in
 `crates/orbit-pi/src/ui/`, surfaces import `crate::ui::prelude`, `app/helpers.rs`
 is gone, and `scripts/check_ui_owners.py` guards ownership. The Explorer,
@@ -736,7 +836,28 @@ off-thread, with the row removed only on success); `project_delete_refusal`
 refuses a filesystem root, the home folder, a folder that contains another
 project, and a folder a live task still works in, and its cases are covered in
 `sidebar_remove_tests`. **New project…** (command palette) adds a folder to the sidebar with no pi session
-(`OrbitApp::new_project` → `add_workspace`). Settings → Providers & models renders
+(`OrbitApp::new_project` → `add_workspace`); since #166 it is also a
+labelled button beside New session on the sidebar's own creation row under
+search (`sidebar_create_actions`: a square icon-only New project leading, a labelled New session filling the rest, both Secondary); the search row
+keeps search and the view menu. `Button` labels now truncate with an ellipsis
+when their row squeezes them. #166 also adds a project display name (`WorkspaceMark::name`,
+stored as `name` in `workspaces.json` beside icon and tint, edited from the
+header menu's **Rename…** in `app/project_rename_ui.rs`): the group's identity
+stays the folder label, so a rename moves no collapsed state, order or pin.
+**Delete session…** is enabled for any session without a run in flight
+(`session_delete_blocked`); confirming on the open session first hands the
+window to a new task (which parks it), then drops the parked process before
+removing the file. The session menu's **Branch from a message…** opens the
+rewind picker, switching to the session first and waiting for its `get_state`
+like Rename. A launch with no remembered folder uses `first_launch_workspace`:
+the process cwd unless it is a filesystem root or inside the executable's
+directory, otherwise the home folder. The **Work in** picker groups its rows
+under two section labels painted inside the first row of each section
+(`work_in_section_start`, so the row count `scroll_to_item` uses is
+unchanged): **This device** and **Remote**, the latter carrying the single
+Experimental tag. Remote always ends with `WorkInRow::AddRemoteHost`, which
+opens Settings → Remote hosts with the add-host form (the form is painted by
+Settings). Settings → Providers & models renders
 connected and unconnected providers as rows on two grouped boards (the shared
 `settings_group` surface, not a card grid). A row's head is one line — brand mark, name,
 status, one truncated facts line, and on the right only the model count, the first
@@ -749,7 +870,11 @@ filter narrows the list, while a sign-in runs and while a removal is confirmed; 
 toggle is kept per provider in `provider_models_open`. A selected chip means
 the composer's picker offers that model, a click writes the hide-list
 (`hidden_models`), the context window shows where pi reports one, and Hide all / Show all
-sits beside the count. The row's **Models**/**Configure** dialog edits the ids, endpoint
+sits beside the count. Each expanded list has a **Search models…** field matching model
+ids and display names, case-insensitively. Search drafts are independent per provider/account
+and survive folding the row; an empty result keeps the field visible. Local search only
+filters chips: visibility counts and Show all / Hide all keep their section-wide scope.
+The row's **Models**/**Configure** dialog edits the ids, endpoint
 and key (the text field is the bulk-paste path; **Fetch models** adds the endpoint's ids to
 it) and does not repeat the list.
 
@@ -773,7 +898,11 @@ tier (which writes the `tools:` line and derives the child's ceiling), the workf
 the thinking level, the description and the prompt. Saves are surgical — only the five keys Orbit
 owns change, and a file edited elsewhere is never clobbered without an explicit overwrite; a user
 agent can be created, duplicated, renamed, disabled, deleted (Undo restores the exact bytes) and
-reset to builtin. A child's side-pane tab is its live transcript (D24): the child's own pi
+reset to builtin. A builtin has no file of its own, so saving one writes the user override that
+takes precedence; the form's primary button says Create for a draft and Save for anything that
+already has a file, stays disabled until the form differs from what was loaded, and carries the
+override path in its tooltip. Leaving the page or switching settings sections with unsaved edits
+holds the navigation and names the destination it was going to before the edits are dropped. A child's side-pane tab is its live transcript (D24): the child's own pi
 events, read from the extension's event log and painted with the chat's rows, under a one-line
 status (state mark, status, elapsed); each tab wears the child's state mark, and two tabs for the
 same agent are numbered. Without a readable local log the tab keeps the summary panel. Covered by
@@ -1013,6 +1142,18 @@ session row carries no hover-revealed `…`, which is why the title owns the ful
 line width and why the keyboard/palette delete path anchors its confirmation to
 the row itself.
 
+The session hover/keyboard preview card groups title and optional prompt summary,
+then folder/workspace and its full monospace path, with branch and divergence on
+a separate row with the same icon/text columns (no nested branch indent).
+All provider/model labels wrap in full; the card uses a definite viewport-derived
+width and maximum height with vertical scrolling instead of hiding metadata.
+The optional Open shortcut is a quiet divided footer. Compact grouping and explicit
+1.3 line height retain readability. Shared floating elevation, the 500 ms opening
+delay, cached data and keyboard preview path remain; a 200 ms leave grace permits
+pointer handoff into the card for scrolling, including a keyboard-opened preview.
+No I/O is added to rendering. Native screen-reader semantics, keyboard-only scrolling
+of preview contents and on-device visual verification remain unverified.
+
 Session rows show execution status independently of read/unread state. The same
 `SessionExecution` reducer consumes the foreground and parked sessions' real pi
 events: Running, Waiting for approval/input, Retrying, Compacting, Completed,
@@ -1243,7 +1384,7 @@ the product; the per-item detail lives in AGENTS.md.
 | P2 | Data layer: serde models, sessions/catalog/workbench clients | ✅ Shipped |
 | P3 | Core chat: transcript, streaming, markdown, composer, tools, diff | ✅ Shipped (stream veil + explicit ≤8.3 Hz pipeline open) |
 | P4 | Workbench pages + settings persistence | ✅ Shipped (plus Explorer/Files, terminal, Git/GitHub, localization, updater) |
-| P5 | Mermaid + a11y | ◐ Native flowchart rendering + code-block fallback for the rest + reduce-motion shipped; other diagram types, app-wide focus rings, screen-reader labeling open |
+| P5 | Mermaid + a11y | ◐ Native flowchart rendering + code-block fallback for the rest + reduce-motion shipped; other diagram types, screen-reader labeling open; focus rings are deliberately not painted (keyboard focus still moves) |
 | P6 | Tests, perf harness, packaging/notarization, CI | ◐ Unit/live tests, 10k perf test, signed `.app`/DMG, CI shipped; on-device scroll benchmark + streaming edge coverage open |
 
 Transcript Markdown export is available from each settled response's footer and,
@@ -1252,7 +1393,7 @@ output and image data and refuses to overwrite existing files. Manual GUI
 verification remains open (`docs/plans/transcript-actions.md`).
 
 Open backlog (detail in AGENTS.md): on-device scroll-perf measurement,
-stream veil, explicit streaming commit pipeline, app-wide focus rings, screen-reader labeling, richer
+stream veil, explicit streaming commit pipeline, screen-reader labeling, richer
 per-tool renderers, Windows/Linux native polish.
 
 ## Top risks (with mitigations)

@@ -5,9 +5,34 @@ use crate::theme::tokens::{picker, ButtonSize, DynamicSpacing, Radius, TextSize}
 use crate::theme::Theme;
 use gpui::{div, AnyElement, InteractiveElement, IntoElement, ParentElement, SharedString, Styled};
 
+/// The bundled symbols font (`assets/fonts/SymbolsNerdFont-Regular.ttf`),
+/// registered at launch, so a keycap never depends on what the OS has.
+const KEY_ICON_FONT: &str = "Symbols Nerd Font";
+
+/// The keyboard icon the bundled symbols font draws for a macOS key mark.
+///
+/// The marks themselves (`↵`, `⌥`, `⌘`, `⌃`, `⇧`) are text: each comes from
+/// whichever font covers it and sits at that font's own height, and text
+/// layout centres the line box, not the ink. `↵` in particular is drawn above
+/// the middle, so in a chord it rode about 1.5px higher than the `⌥` beside it.
+/// The icon font's keyboard glyphs are drawn on the middle of the em box, so
+/// every cap centres its mark the same way. Words (`Esc`, `Tab`, `Enter`) and
+/// letters stay text.
+fn key_icon(label: &str) -> Option<char> {
+    Some(match label {
+        "↵" => '\u{F0311}', // keyboard-return
+        "⌥" => '\u{F0635}', // apple-keyboard-option
+        "⌘" => '\u{F0633}', // apple-keyboard-command
+        "⌃" => '\u{F0634}', // apple-keyboard-control
+        "⇧" => '\u{F0636}', // apple-keyboard-shift
+        _ => return None,
+    })
+}
+
 /// Render a key label supplied by the caller.
 pub(crate) fn kbd_key(label: impl Into<SharedString>, theme: &Theme) -> AnyElement {
-    div()
+    let label = label.into();
+    let cap = div()
         .h(ButtonSize::Compact.height(theme))
         .min_w(ButtonSize::Compact.height(theme))
         .px(DynamicSpacing::Base04.px(theme))
@@ -18,9 +43,14 @@ pub(crate) fn kbd_key(label: impl Into<SharedString>, theme: &Theme) -> AnyEleme
         .justify_center()
         .bg(theme.overlay_strong)
         .text_size(TextSize::XSmall.px(theme))
-        .text_color(theme.text_secondary)
-        .child(label.into())
-        .into_any_element()
+        .text_color(theme.text_secondary);
+    match key_icon(&label) {
+        Some(glyph) => cap
+            .debug_selector(|| "kbd-key-icon".to_string())
+            .child(div().font_family(KEY_ICON_FONT).child(glyph.to_string())),
+        None => cap.child(label),
+    }
+    .into_any_element()
 }
 
 /// Group the platform-specific key labels of a canonical shortcut chord.
@@ -125,6 +155,31 @@ fn keyboard_legend(theme: &Theme) -> gpui::Div {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every macOS modifier and the Return mark draw as the symbols font's
+    /// keyboard icon, so the caps in one chord centre alike; words and
+    /// letters stay text.
+    #[test]
+    fn key_marks_draw_as_centred_icons() {
+        for mark in ["↵", "⌥", "⌘", "⌃", "⇧"] {
+            assert!(key_icon(mark).is_some(), "{mark} keeps its text glyph");
+        }
+        for text in ["Esc", "Tab", "Enter", "Alt", "B", "1", "↑"] {
+            assert!(key_icon(text).is_none(), "{text} must stay text");
+        }
+    }
+
+    /// The icons come from the bundled symbols font, not the system's.
+    #[test]
+    fn key_icons_use_the_bundled_symbols_font() {
+        use gpui::AssetSource as _;
+        assert!(crate::assets::Assets
+            .load("fonts/SymbolsNerdFont-Regular.ttf")
+            .ok()
+            .flatten()
+            .is_some());
+        assert_eq!(KEY_ICON_FONT, "Symbols Nerd Font");
+    }
     use crate::ui::row::{picker_entry, PickerRow};
     use gpui::{point, px, Context, IntoElement, Render, TestAppContext, Window};
 

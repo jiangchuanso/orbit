@@ -58,7 +58,7 @@ impl Theme {
 
 // ── Corner radius + borders (`gpui_macros/src/styles.rs`) ───────────────
 
-/// Orbit's corner scale, in pixels before the corner-rounding preference.
+/// Orbit's corner scale, in pixels. Fixed: there is no user rounding setting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Radius {
     /// 4px.
@@ -77,21 +77,14 @@ impl Radius {
     /// One radius ramp for every palette. Shapes are
     /// part of the design language, not of a palette, so Orbit Azure and
     /// Operational draw the same button and the same card.
-    ///
-    /// The user's corner-rounding setting still shifts every corner except
-    /// [`Radius::Full`], which stays circular.
-    pub fn px(self, theme: &Theme) -> Pixels {
-        let base = match self {
-            Self::Full => return px(9999.),
+    pub fn px(self, _theme: &Theme) -> Pixels {
+        match self {
+            Self::Full => px(9999.),
             Self::Small => px(4.),
             Self::Medium => px(6.),
             Self::Large => px(9.),
             Self::XLarge => px(12.),
-        };
-        base + px(theme
-            .ui
-            .corner_rounding
-            .min(crate::theme::MAX_CORNER_ROUNDING) as f32)
+        }
     }
 }
 
@@ -437,9 +430,17 @@ pub mod list_item {
 pub mod panel {
     use super::*;
 
-    /// Standard panel/card corner: 12px before the rounding preference,
-    /// shared by all palettes.
+    /// Standard panel/card corner: 12px, shared by all palettes.
     pub const RADIUS: Radius = Radius::XLarge;
+
+    /// The air around a workbench card (a page, Explorer, Review, session
+    /// details): between two cards, from the sidebar, and from the window's
+    /// right and bottom edges. One value on every side keeps the cards'
+    /// corners clear of the window's own rounded corner, so neither curve
+    /// clips the other.
+    pub fn gutter(theme: &Theme) -> Pixels {
+        DynamicSpacing::Base06.px(theme)
+    }
 }
 
 /// `List` and `ListSeparator` metrics.
@@ -541,9 +542,24 @@ pub mod picker {
         ROW_SPACING.row_height(BufferLineHeight::Comfortable.resolve(TEXT.px(theme)), theme)
     }
 
-    /// A two-line row: a Default label over a Small secondary line.
+    /// The leading of a two-line row's stacked title and secondary line:
+    /// `Standard` (1.3×), not the `Comfortable` (1.618×) a one-line row is
+    /// centred in. Comfortable on each of two stacked lines puts both lines'
+    /// half-leading between the glyphs — about 8px of air at the default size —
+    /// which reads as two separate items rather than a label and its caption.
+    pub const STACK_LEADING: BufferLineHeight = BufferLineHeight::Standard;
+
+    /// One line box of a stacked title / secondary pair at `size`. Every
+    /// two-line row's text, its leading mark and its trailing title slot sit
+    /// on these boxes, so the pair is exactly [`two_line_entry_height`] tall.
+    pub fn stack_line_height(size: TextSize, theme: &Theme) -> Pixels {
+        STACK_LEADING.resolve(size.px(theme))
+    }
+
+    /// A two-line row: a Default label over a Small secondary line, on
+    /// [`STACK_LEADING`] — 42px at the default size.
     pub fn two_line_entry_height(theme: &Theme) -> Pixels {
-        let line = |size: TextSize| BufferLineHeight::Comfortable.resolve(size.px(theme));
+        let line = |size: TextSize| stack_line_height(size, theme);
         ROW_SPACING.row_height(line(TEXT) + line(SECONDARY_TEXT), theme)
     }
 }
@@ -698,7 +714,7 @@ pub mod toast {
 pub mod modal {
     use super::*;
 
-    /// A modal is softer than a popover while following the rounding preference.
+    /// A modal is softer than a popover: the panel corner plus 4px.
     pub fn radius(theme: &Theme) -> Pixels {
         panel::RADIUS.px(theme) + px(4.)
     }
@@ -932,8 +948,6 @@ pub enum InteractionState {
     Hover,
     /// The pointer or space bar is held down.
     Pressed,
-    /// Keyboard focus is on the control.
-    Focused,
     /// Present but not operable.
     Disabled,
     /// Not a state: the translucent treatment a control takes when it floats
@@ -946,15 +960,14 @@ impl InteractionState {
     /// The wash painted behind a row, a ghost control, or a menu entry.
     ///
     /// `None` means paint nothing: the control keeps the surface beneath it.
-    /// That covers `Focused` (focus is a frame, never a fill — `DESIGN.md`
-    /// §Focus) and the two role exceptions above.
+    /// Keyboard focus is not a state here at all: Orbit paints no focus ring
+    /// and no focus fill.
     ///
     /// Hover and pressed resolve through [`Theme::hover_wash`] /
     /// [`Theme::pressed_wash`], so a control inside a frosted card or pane
     /// takes an ink wash and one on an opaque surface keeps the palette step.
     pub fn fill(self, theme: &Theme) -> Option<Hsla> {
         match self {
-            Self::Focused => None,
             Self::Hover => Some(theme.hover_wash()),
             Self::Pressed => Some(theme.pressed_wash()),
             Self::Disabled | Self::Glass => Some(theme.overlay),
@@ -963,12 +976,11 @@ impl InteractionState {
 
     /// The frame around the control.
     ///
-    /// Only `Focused` carries the focus ring. `Disabled` gets the quiet
-    /// hairline so a disabled field still reads as a field, and every other
-    /// state keeps whatever border its role defines.
+    /// `Disabled` gets the quiet hairline so a disabled field still reads as
+    /// a field, and every other state keeps whatever border its role defines.
+    /// There is no focus ring.
     pub fn border(self, theme: &Theme) -> Option<Hsla> {
         match self {
-            Self::Focused => Some(theme.focus_ring),
             Self::Disabled => Some(theme.hairline_subtle()),
             _ => None,
         }
@@ -1213,13 +1225,17 @@ mod tests {
     use super::*;
     use crate::theme::UiPrefs;
 
+    /// The corner scale is fixed: no preference moves it, and pills stay
+    /// round. A UI font change must not move a corner either.
     #[test]
-    fn corner_rounding_adjusts_shared_shapes_without_changing_pills_or_square_edges() {
-        let mut theme = Theme::dark();
-        let base = Radius::Large.px(&theme);
-        theme.ui.corner_rounding = crate::theme::MAX_CORNER_ROUNDING;
-        assert_eq!(Radius::Large.px(&theme), base + px(4.));
-        assert_eq!(Radius::Full.px(&theme), px(9999.));
+    fn the_corner_scale_is_fixed() {
+        for theme in [Theme::dark(), theme_with(20., 120)] {
+            assert_eq!(Radius::Small.px(&theme), px(4.));
+            assert_eq!(Radius::Medium.px(&theme), px(6.));
+            assert_eq!(Radius::Large.px(&theme), px(9.));
+            assert_eq!(Radius::XLarge.px(&theme), px(12.));
+            assert_eq!(Radius::Full.px(&theme), px(9999.));
+        }
     }
 
     fn theme_with(ui_font_size: f32, spacing_density: u32) -> Theme {
@@ -1330,11 +1346,6 @@ mod tests {
         assert!(close(modal::radius(&theme), 16.));
         assert!(close(input::RADIUS.px(&theme), 9.));
         assert_eq!(input::composer_radius(&theme), px(12.));
-        let mut rounded = theme;
-        rounded.ui.corner_rounding = crate::theme::MAX_CORNER_ROUNDING;
-        assert_eq!(input::composer_radius(&rounded), px(12.));
-        assert_eq!(modal::radius(&rounded), modal::radius(&theme) + px(4.));
-        assert_ne!(input::RADIUS.px(&rounded), input::RADIUS.px(&theme));
         assert_eq!(list_item::RADIUS, Radius::Medium);
     }
 
@@ -1423,6 +1434,22 @@ mod tests {
         let line = px(20.);
         assert_eq!(ListItemSpacing::Dense.row_height(line, &theme), px(20.));
         assert!(close(ListItemSpacing::Sparse.row_height(line, &theme), 28.));
+    }
+
+    /// A two-line row stacks its title and caption on the Standard leading,
+    /// so the caption reads as the title's own: the pair is 18 + 16px at the
+    /// default size (GPUI rounds line boxes), where Comfortable's 23 + 19px put
+    /// about 8px of air between them. A one-line row keeps its Comfortable 31px.
+    #[test]
+    fn two_line_rows_stack_on_the_standard_leading() {
+        let theme = default_theme();
+        assert_eq!(picker::STACK_LEADING, BufferLineHeight::Standard);
+        assert!(close(picker::stack_line_height(picker::TEXT, &theme), 18.));
+        assert!(close(picker::stack_line_height(picker::SECONDARY_TEXT, &theme), 16.));
+        assert!(close(picker::two_line_entry_height(&theme), 42.));
+        assert!(close(picker::entry_height(&theme), 31.));
+        // Still clearly taller than a one-line row, and shorter than two of them.
+        assert!(picker::two_line_entry_height(&theme) > picker::entry_height(&theme));
     }
 
     #[test]
@@ -1566,12 +1593,8 @@ mod tests {
     }
 
     #[test]
-    fn only_focus_paints_the_ring_and_only_disabled_paints_the_hairline() {
+    fn only_disabled_paints_the_hairline() {
         let theme = Theme::dark();
-        assert_eq!(
-            InteractionState::Focused.border(&theme),
-            Some(theme.focus_ring)
-        );
         assert_eq!(
             InteractionState::Disabled.border(&theme),
             Some(theme.border_subtle)
@@ -1579,11 +1602,6 @@ mod tests {
         for state in [InteractionState::Hover, InteractionState::Pressed] {
             assert_eq!(state.border(&theme), None, "{state:?} draws no frame");
         }
-        assert_eq!(
-            InteractionState::Focused.fill(&theme),
-            None,
-            "focus is a frame, never a fill"
-        );
     }
 
     #[test]

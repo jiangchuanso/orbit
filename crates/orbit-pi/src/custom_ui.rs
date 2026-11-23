@@ -354,7 +354,7 @@ impl Render for CustomUi {
                     .items_center()
                     .justify_center()
                     .rounded(panel::RADIUS.px(&theme))
-                    .bg(theme.surface_secondary)
+                    .bg(theme.control_face(theme.surface_secondary))
                     .border_1()
                     .border_color(theme.hairline())
                     .child(icon(

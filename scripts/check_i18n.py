@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-"""Fail if a `tr!(...)` in Orbit is misused.
+"""Fail if a `tr!(...)` in Orbit is misused, or a locale file drifts.
 
-Three checks:
+Each `locales/<locale>.yml` is hand-edited and holds that language's
+translations; `en.yml` is the source of keys, their order and placeholders.
+
+Four checks:
 
 1. Every `tr!("key")` used in the source has an entry in `locales/en.yml`.
    rust-i18n would otherwise render the raw key.
@@ -14,17 +17,27 @@ Three checks:
    exactly like its English is "untranslated" unless it is listed in
    `scripts/i18n_untranslated_baseline.json` — the existing debt, burned down
    per release instead of blocking PRs. A new feature ships its translations
-   (a glossary entry, then `gen_locales.py`) or adds its keys to the baseline
-   on purpose. Translating a baselined string leaves a stale entry; `--update`
-   rewrites the baseline to what is untranslated now.
+   (in each locale file) or adds its keys to the baseline on purpose.
+   Translating a baselined string leaves a stale entry; `--update` rewrites
+   the baseline to what is untranslated now.
+4. Every locale file has exactly `en.yml`'s keys, in `en.yml`'s order, and
+   each translation keeps the placeholders its English declares — a renamed
+   or dropped `%{name}` would print literally or lose the value.
 
 Run from the repo root:
 
     python3 scripts/check_i18n.py            # check (CI)
+    python3 scripts/check_i18n.py --sync     # bring every locale in line with en.yml
     python3 scripts/check_i18n.py --update   # rewrite the untranslated baseline
 
-Exit status is 1 when a key is missing, a placeholder does not match, or a
-locale has an untranslated string outside the baseline, so CI can gate on it.
+`--sync` rewrites each locale in `en.yml`'s key order, keeps every existing
+translation, adds a new key with its English text (to be translated) and
+drops a key `en.yml` no longer has. Run it after adding or removing an
+`en.yml` key, then translate the new lines.
+
+Exit status is 1 when a key is missing, a placeholder does not match, a
+locale file drifts from `en.yml`, or a locale has an untranslated string
+outside the baseline, so CI can gate on it.
 """
 import io
 import json
@@ -148,7 +161,7 @@ def check_untranslated(update):
         stale += len(known - set(keys))
         new += len(fresh)
         for key in fresh:
-            print(f"UNTRANSLATED {locale}: {key}  (add a glossary entry and run gen_locales.py)")
+            print(f"UNTRANSLATED {locale}: {key}  (translate it in locales/{locale}.yml)")
     summary = ", ".join(f"{locale} {len(keys)}" for locale, keys in report.items())
     print(f"untranslated: {summary}")
     if stale:
@@ -159,7 +172,74 @@ def check_untranslated(update):
     return new
 
 
+def locale_paths():
+    """locale -> path, for every translated locale file."""
+    return {
+        name[: -len(".yml")]: os.path.join(LOCALES, name)
+        for name in sorted(os.listdir(LOCALES))
+        if name.endswith(".yml") and name != "en.yml"
+    }
+
+
+def ordered_keys(path):
+    """The keys a flat locale file holds, in file order."""
+    keys = []
+    for line in io.open(path, encoding="utf-8"):
+        match = re.match(r'^([\w.\-]+):\s*"', line)
+        if match:
+            keys.append(match.group(1))
+    return keys
+
+
+def check_structure():
+    """Pass 4: each locale mirrors en.yml's keys, order and placeholders."""
+    english = parse_values(EN)
+    order = ordered_keys(EN)
+    problems = 0
+    for locale, path in locale_paths().items():
+        values = parse_values(path)
+        missing = [key for key in order if key not in values]
+        extra = [key for key in values if key not in english]
+        for key in missing:
+            print(f"LOCALE MISSING {locale}: {key}  (run check_i18n.py --sync)")
+        for key in extra:
+            print(f"LOCALE STALE {locale}: {key} is not in en.yml  (run check_i18n.py --sync)")
+        if not missing and not extra and ordered_keys(path) != order:
+            print(f"LOCALE ORDER {locale}: keys are not in en.yml order  (run check_i18n.py --sync)")
+            problems += 1
+        for key, value in values.items():
+            want = set(PLACEHOLDER.findall(english.get(key, "")))
+            got = set(PLACEHOLDER.findall(value))
+            if key in english and got != want:
+                print(
+                    f"LOCALE PLACEHOLDER {locale}: {key} has {sorted(got) or 'none'}, "
+                    f"en.yml declares {sorted(want) or 'none'}"
+                )
+                problems += 1
+        problems += len(missing) + len(extra)
+    return problems
+
+
+def sync_locales():
+    """Rewrite every locale in en.yml's order, keeping its translations."""
+    english = parse_values(EN)
+    order = ordered_keys(EN)
+    for locale, path in locale_paths().items():
+        values = parse_values(path)
+        added = [key for key in order if key not in values]
+        dropped = [key for key in values if key not in english]
+        with io.open(path, "w", encoding="utf-8") as handle:
+            handle.write("_version: 1\n")
+            for key in order:
+                # Values stay exactly as written (escapes included), so a
+                # sync never re-quotes a translation.
+                handle.write(f'{key}: "{values.get(key, english[key])}"\n')
+        print(f"synced {locale}.yml: {len(added)} added in English, {len(dropped)} dropped")
+
+
 def main():
+    if "--sync" in sys.argv[1:]:
+        sync_locales()
     update = "--update" in sys.argv[1:]
     used = {}
     for dirpath, _, files in os.walk(ROOT):
@@ -209,13 +289,15 @@ def main():
         )
 
     fresh_untranslated = check_untranslated(update)
+    drift = check_structure()
 
     print(
         f"{len(used)} keys used, {len(defined)} defined, {len(missing)} missing, "
         f"{len(mismatches)} placeholder mismatch(es), "
-        f"{fresh_untranslated} new untranslated string(s)"
+        f"{fresh_untranslated} new untranslated string(s), "
+        f"{drift} locale file problem(s)"
     )
-    return 1 if missing or mismatches or fresh_untranslated else 0
+    return 1 if missing or mismatches or fresh_untranslated or drift else 0
 
 
 if __name__ == "__main__":

@@ -489,11 +489,6 @@ const SETTINGS_SEARCH_INDEX: &[(SettingsSection, &str, &str)] = &[
     ),
     (
         SettingsSection::Appearance,
-        "settings.corner_rounding",
-        "corner rounding radius rounded shape",
-    ),
-    (
-        SettingsSection::Appearance,
         "settings.show_sidebar",
         "sidebar show layout navigation",
     ),
@@ -574,6 +569,11 @@ fn settings_section_meta(section: SettingsSection) -> (&'static str, &'static st
         .unwrap_or(("icons/settings.svg", "settings.general"))
 }
 
+/// A section's translated nav label, for prompts that name where leaving goes.
+pub(super) fn settings_section_label(section: SettingsSection) -> String {
+    tr!(settings_section_meta(section).1)
+}
+
 /// Settings whose translated label or keyword list contains the already
 /// lowercased `needle`, in index order. An empty needle matches nothing —
 /// callers only mount results while a query is active.
@@ -622,30 +622,6 @@ enum PluginOp {
     Remove,
 }
 
-/// Whether a Settings navigation row draws the focus ring: only for the
-/// keyboard cursor, and only when it rests *away* from the open section. On
-/// the selected row the selected fill already says where you are, so clicking
-/// a section (which focuses the list) never leaves a ring around it.
-fn settings_nav_ring(list_focused: bool, cursor: usize, index: usize, selected: bool) -> bool {
-    list_focused && cursor == index && !selected
-}
-
-#[cfg(test)]
-mod settings_nav_ring_tests {
-    use super::settings_nav_ring;
-
-    #[test]
-    fn the_ring_marks_only_a_cursor_away_from_the_selection() {
-        // A click: the list is focused and the cursor is the selected row.
-        assert!(!settings_nav_ring(true, 3, 3, true));
-        // Arrowing onto another row: that row shows where Enter will go.
-        assert!(settings_nav_ring(true, 4, 4, false));
-        // Every other row, and an unfocused list, draw nothing.
-        assert!(!settings_nav_ring(true, 4, 3, true));
-        assert!(!settings_nav_ring(false, 4, 4, false));
-    }
-}
-
 impl OrbitApp {
     // ── settings surface ───────────────────────────────────────────
     // Left nav (Back + sections), right column of setting
@@ -653,14 +629,29 @@ impl OrbitApp {
     // real pi/runtime facts (PRODUCT.md: nothing decorative that
     // pretends to be functional).
 
-    pub(super) fn render_settings(
-        &self,
-        window: &Window,
-        cx: &Context<Self>,
-    ) -> impl IntoElement + use<> {
+    pub(super) fn render_settings(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        if self.settings_section == SettingsSection::Providers {
+            // Each provider (including account aliases) keeps its own draft
+            // across collapse/reopen, without sharing the page-wide filter.
+            for view in self.provider_views() {
+                self.provider_model_filters
+                    .entry(view.id.clone())
+                    .or_insert_with(|| {
+                        let input = cx.new(|cx| {
+                            ComposerInput::new(cx)
+                                .with_element_id(format!("provider-model-filter-{}", view.id))
+                                .with_placeholder_key("app.search_models")
+                                .with_key_context("Composer Picker")
+                                .with_max_lines(1)
+                                .with_wrap(false)
+                        });
+                        let subscription = cx.observe(&input, |_, _, cx| cx.notify());
+                        (input, subscription)
+                    });
+            }
+        }
         let this = cx.entity();
         let theme = *theme::get(cx);
-        let nav_focused = self.settings_nav_focus.is_focused(window);
 
         div()
             .flex_1()
@@ -765,12 +756,6 @@ impl OrbitApp {
                                     let this = this.clone();
                                     let label = tr!(label_key).to_string();
                                     let selected = self.settings_section == section;
-                                    let focused = settings_nav_ring(
-                                        nav_focused,
-                                        self.settings_nav_cursor,
-                                        index,
-                                        selected,
-                                    );
                                     // Group starts: Runtime opens the agent
                                     // block, Skills opens the extensions
                                     // block, and About closes the list alone.
@@ -790,11 +775,7 @@ impl OrbitApp {
                                         .px(DynamicSpacing::Base08.px(&theme))
                                         .rounded(Radius::Medium.px(&theme))
                                         .border_1()
-                                        .border_color(if focused {
-                                            theme.focus_ring
-                                        } else {
-                                            gpui::transparent_black()
-                                        })
+                                        .border_color(gpui::transparent_black())
                                         .text_size(TextSize::Default.px(&theme))
                                         .flex()
                                         .items_center()
@@ -901,17 +882,48 @@ impl OrbitApp {
             // matches instead of the active section. Skills owns a full-bleed
             // master-detail surface; every other section is a fixed header + a
             // scrolling column of cards.
+            //
+            // A section is a navigation, so its content arrives with a fade
+            // (`motion::arrive`) inside a column that never moves — the nav
+            // beside it stays put. The name is the section's own label key, so
+            // the destination identifies the clock and searching (which only
+            // updates the content of one destination) does not re-fade on every
+            // keystroke.
             .child({
                 let searching = !self.settings_search.read(cx).text().trim().is_empty();
-                if searching {
-                    self.settings_search_results(theme, this.clone(), cx)
+                let (page, body) = if searching {
+                    (
+                        "settings.search",
+                        self.settings_search_results(theme, this.clone(), cx),
+                    )
                 } else if self.settings_section == SettingsSection::Skills {
-                    self.render_skills_page(theme, this.clone(), cx)
+                    (
+                        "settings.skills",
+                        self.render_skills_page(theme, this.clone(), cx),
+                    )
                 } else if self.settings_section == SettingsSection::Subagents {
-                    self.render_subagents_page(theme, this.clone(), cx)
+                    (
+                        "settings.subagents",
+                        self.render_subagents_page(theme, this.clone(), cx),
+                    )
                 } else {
-                    self.settings_body(theme, this.clone(), cx)
-                }
+                    (
+                        settings_section_meta(self.settings_section).1,
+                        self.settings_body(theme, this.clone(), cx),
+                    )
+                };
+                crate::motion::arrive(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
+                        .child(body),
+                    page,
+                    &theme,
+                    Motion::Layout,
+                )
             })
             // ── provider editor modals (models.json + API key) ──
             .children(self.provider_editor_layer(theme, this.clone(), cx))
@@ -1238,13 +1250,26 @@ impl OrbitApp {
             .gap(DynamicSpacing::Base16.px(&theme))
             .child(
                 div()
+                    .debug_selector(|| "about-identity-mark".to_string())
                     .flex_none()
+                    // A definite box: the mark is a height-driven image, so its
+                    // width would otherwise come from the decoded asset and the
+                    // identity row would reflow when it arrived.
+                    .size(IconSize::XLarge.px(&theme))
                     .child(embedded_image(
                         crate::app_icon::ASSET,
                         f32::from(IconSize::XLarge.px(&theme)),
                     )),
             )
-            .child(text)
+            // The identity text takes the row's remaining width, so the
+            // subtitle and the version line wrap at the page rather than at the
+            // title's own width. It is `flex_1` *here* and not on `text`
+            // itself: every other section hands this column to a column parent,
+            // where growing would stretch the header instead of widening it.
+            .child(
+                text.flex_1()
+                    .debug_selector(|| "about-identity-text".to_string()),
+            )
             .into_any_element()
     }
 
@@ -1939,7 +1964,6 @@ impl OrbitApp {
         let field = input_field_frame(div(), &theme)
             .flex_1()
             .min_w_0()
-            .bg(theme.background)
             .child(icon(
                 "icons/extensions.svg",
                 IconSize::Small.px(&theme),
@@ -2503,7 +2527,7 @@ impl OrbitApp {
                         // models rather than the provider itself.
                         let narrowed =
                             favorites_only || (!needle.is_empty() && !provider_hit(view));
-                        self.provider_row(view, &models, narrowed, theme, this.clone())
+                        self.provider_row(view, &models, narrowed, theme, this.clone(), cx)
                     })
                     .collect();
                 rows.push(
@@ -3103,6 +3127,7 @@ impl OrbitApp {
         narrowed: bool,
         theme: Theme,
         this: Entity<OrbitApp>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let confirming = self.provider_remove_confirm.as_deref() == Some(view.id.as_str());
         // Usage opens in a popup (see `provider_usage_layer`).
@@ -3142,7 +3167,7 @@ impl OrbitApp {
             .size(ButtonSize::Large.height(&theme) + DynamicSpacing::Base04.px(&theme))
             .flex_none()
             .rounded(Radius::Large.px(&theme))
-            .bg(theme.surface_elevated)
+            .bg(theme.control_face(theme.surface_elevated))
             .border_1()
             .border_color(theme.hairline_subtle())
             .flex()
@@ -3565,7 +3590,7 @@ impl OrbitApp {
                 })
                 .children(auth_section)
                 .when(!models.is_empty(), |panel| {
-                    panel.child(self.provider_model_list(&view.id, models, theme, this.clone()))
+                    panel.child(self.provider_model_list(&view.id, models, theme, this.clone(), cx))
                 })
         });
 
@@ -3609,7 +3634,25 @@ impl OrbitApp {
         models: &[&ModelEntry],
         theme: Theme,
         this: Entity<OrbitApp>,
+        cx: &Context<Self>,
     ) -> AnyElement {
+        let filter = self
+            .provider_model_filters
+            .get(provider)
+            .map(|(input, _)| input);
+        let needle = filter
+            .map(|input| input.read(cx).text().trim().to_lowercase())
+            .unwrap_or_default();
+        let matches: Vec<_> = models
+            .iter()
+            .copied()
+            .filter(|model| {
+                model.id.to_lowercase().contains(&needle)
+                    || model.name.to_lowercase().contains(&needle)
+            })
+            .collect();
+        // Visibility counts and bulk actions retain their section-wide scope;
+        // typing a local search never silently changes what "all" means.
         let hidden = crate::hidden_models::all();
         let shown = models
             .iter()
@@ -3624,7 +3667,7 @@ impl OrbitApp {
             .grid_cols(2)
             .gap(DynamicSpacing::Base04.px(&theme))
             .children(
-                models
+                matches
                     .iter()
                     .map(|model| self.provider_model_chip(model, &hidden, theme, this.clone())),
             );
@@ -3704,6 +3747,22 @@ impl OrbitApp {
                             )
                             .child(bulk),
                     )
+                    .children(filter.map(|input| {
+                        search_field(input.clone(), &theme)
+                            .w_full()
+                            .debug_selector({
+                                let provider = provider.to_string();
+                                move || format!("provider-model-search-{provider}")
+                            })
+                    }))
+                    .when(matches.is_empty(), |panel| {
+                        panel.child(
+                            div()
+                                .text_size(TextSize::Small.px(&theme))
+                                .text_color(theme.text_muted)
+                                .child(tr!("settings.no_models_match")),
+                        )
+                    })
                     .child(scroll),
             )
             .into_any_element()
@@ -5186,7 +5245,26 @@ impl OrbitApp {
         this: Entity<OrbitApp>,
         cx: &Context<Self>,
     ) -> Vec<AnyElement> {
-        let behavior = vec![
+        let mut behavior = Vec::new();
+        // Spelling is AppKit's checker, so the switch only exists where it can
+        // actually mark words: a toggle that did nothing on Windows or Linux
+        // would be a lie.
+        if cfg!(target_os = "macos") {
+            behavior.push(self.setting_row(
+                theme,
+                &tr!("settings.check_spelling"),
+                Some(&tr!("settings.check_spelling_hint")),
+                None,
+                Some(self.settings_toggle(
+                    "spell-check-toggle",
+                    theme.ui.spell_check,
+                    theme,
+                    this.clone(),
+                    Self::toggle_spell_check,
+                )),
+            ));
+        }
+        behavior.extend([
             self.setting_row(
                 theme,
                 &tr!("settings.enter_while_running"),
@@ -5250,7 +5328,7 @@ impl OrbitApp {
                 None,
                 Some(self.agent_calls_select(theme, this.clone(), cx)),
             ),
-        ];
+        ]);
 
         let mut sections = Vec::new();
         if self.retrying {
@@ -5642,6 +5720,15 @@ impl OrbitApp {
         cx.notify();
     }
 
+    /// Settings → Agent → Check spelling. The composer reads the pref on every
+    /// render, so an open draft picks the change up without a rebuild.
+    fn toggle_spell_check(&mut self, cx: &mut Context<Self>) {
+        let mut ui = theme::get(cx).ui;
+        ui.spell_check = !ui.spell_check;
+        theme::set_ui_prefs(cx, ui);
+        cx.notify();
+    }
+
     /// Appearance → Reduce motion: a three-way control, because a switch
     /// cannot express `Full` — the state that stops the OS from overruling the
     /// user's own answer.
@@ -5783,6 +5870,25 @@ impl OrbitApp {
                         Some(self.retention_run_button(theme, this.clone())),
                     ),
                 ],
+            ),
+            // A background request Orbit makes on its own: say what it asks,
+            // whom, and when, and let it be turned off.
+            self.settings_section(
+                theme,
+                &tr!("settings.github_activity"),
+                vec![self.setting_row(
+                    theme,
+                    &tr!("settings.github_checks"),
+                    Some(&tr!("settings.github_checks_description")),
+                    None,
+                    Some(self.settings_toggle(
+                        "github-checks-toggle",
+                        self.git_activity_store.github_checks,
+                        theme,
+                        this.clone(),
+                        Self::toggle_github_checks,
+                    )),
+                )],
             ),
             self.remembered_approvals_section(theme, this),
         ]
@@ -6231,18 +6337,6 @@ impl OrbitApp {
                         None,
                         Some(self.preset_select(
                             SettingsSelect::EditorFont,
-                            theme,
-                            this.clone(),
-                            cx,
-                        )),
-                    ),
-                    self.setting_row(
-                        theme,
-                        &tr!("settings.corner_rounding"),
-                        Some(&tr!("settings.corner_rounding_description")),
-                        None,
-                        Some(self.preset_select(
-                            SettingsSelect::CornerRounding,
                             theme,
                             this.clone(),
                             cx,
@@ -7644,11 +7738,6 @@ impl OrbitApp {
                 theme.ui.spacing_density as f32,
                 "%",
             ),
-            SettingsSelect::CornerRounding => (
-                (0..=theme::MAX_CORNER_ROUNDING).map(|v| v as f32).collect(),
-                theme.ui.corner_rounding as f32,
-                "px",
-            ),
             SettingsSelect::Language
             | SettingsSelect::SuggestionsModel
             | SettingsSelect::ReportModel
@@ -7678,7 +7767,6 @@ impl OrbitApp {
                 SettingsSelect::TerminalFont => "terminal-font-select",
                 SettingsSelect::EditorFont => "editor-font-select",
                 SettingsSelect::SpacingDensity => "spacing-density-select",
-                SettingsSelect::CornerRounding => "corner-rounding-select",
                 _ => "settings-select",
             },
             kind,
@@ -8397,9 +8485,6 @@ impl OrbitApp {
             SettingsSelect::SpacingDensity => {
                 ui.spacing_density = SPACING_DENSITIES.get(ix).copied().unwrap_or(100);
             }
-            SettingsSelect::CornerRounding => {
-                ui.corner_rounding = (ix as u32).min(theme::MAX_CORNER_ROUNDING);
-            }
             SettingsSelect::SuggestionsModel
             | SettingsSelect::ReportModel
             | SettingsSelect::UiFontFamily
@@ -8557,9 +8642,12 @@ impl OrbitApp {
         cx.notify();
     }
 
-    fn activate_settings_nav_row(&mut self, index: usize, cx: &mut Context<Self>) {
-        self.settings_nav_cursor = index;
+    pub(super) fn activate_settings_nav_row(&mut self, index: usize, cx: &mut Context<Self>) {
         let (section, _, _) = SETTINGS_SECTIONS[index];
+        // The cursor follows the section that actually opened, never the row
+        // that was clicked: a held navigation (Subagents asks before it drops
+        // edits) leaves both the selection and the keyboard cursor where they
+        // were, so the next arrow/Enter still reads the pane on screen.
         self.set_settings_section(section, cx);
         if self.settings_section == section && !self.settings_search.read(cx).text().is_empty() {
             self.settings_search.update(cx, |search, cx| search.clear(cx));
@@ -9522,13 +9610,11 @@ fn background_tile(
 }
 
 fn settings_radio_group(el: Stateful<Div>, theme: &Theme) -> Stateful<Div> {
-    let ring = theme.focus_ring;
     el.focusable()
         .border_1()
         .border_color(gpui::transparent_black())
         .rounded(button::RADIUS.px(theme))
         .p(DynamicSpacing::Base04.px(theme))
-        .focus(move |style| style.border_color(ring))
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
 }
 
@@ -10087,6 +10173,64 @@ mod model_filter_tests {
 #[cfg(test)]
 mod about_banner_tests {
     use super::*;
+
+    /// The identity header is one compact block — mark, name, version — and the
+    /// board starts right after it.
+    ///
+    /// It regressed once. The text column was a flex item in a *row* with no
+    /// growth, so it was sized to its max-content; for a nested flex column that
+    /// is its narrowest child, the 98px title. The subtitle then wrapped into
+    /// five lines and the version line into three, the header grew to ~1500px,
+    /// and the board — the only thing on this page a reader can act on — began
+    /// 1,600px down a scrolling page in a 640px window.
+    #[gpui::test]
+    fn the_about_identity_header_stays_compact(cx: &mut gpui::TestAppContext) {
+        use crate::theme::{Theme, ThemeId};
+
+        cx.update(|cx| cx.set_global(Theme::for_id(ThemeId::Orbit)));
+        let cx = cx.add_empty_window();
+        let app = cx.update(|_, cx| cx.new(OrbitApp::new));
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.open_settings(cx);
+                app.set_settings_section(SettingsSection::About, cx);
+            })
+        });
+        let viewport = gpui::size(px(960.), px(640.));
+        let _ = cx.draw(point(px(0.), px(0.)), viewport, |_, _| app.clone());
+
+        let title = cx.debug_bounds("settings-page-title").expect("the name");
+        let mark = cx.debug_bounds("about-identity-mark").expect("the mark");
+        let text = cx
+            .debug_bounds("about-identity-text")
+            .expect("the identity text");
+        let version = cx.debug_bounds("about-version").expect("the version line");
+        let board = cx.debug_bounds("about-github").expect("the board");
+
+        assert_eq!(
+            mark.size,
+            gpui::size(px(48.), px(48.)),
+            "the mark has a definite box, not one the decoded asset supplies"
+        );
+        assert!(
+            (mark.origin.y + mark.size.height / 2. - (text.origin.y + text.size.height / 2.))
+                .abs()
+                < px(1.),
+            "the mark is centred on the identity text: {mark:?} beside {text:?}"
+        );
+        assert!(
+            text.size.width > title.size.width * 4.,
+            "the identity text takes the row's width, not the title's: {text:?} against {title:?}"
+        );
+        assert!(
+            version.size.height < px(30.),
+            "the version line is one line, not a wrapped column: {version:?}"
+        );
+        assert!(
+            board.origin.y < viewport.height,
+            "the board is on the first screen: {board:?} in {viewport:?}"
+        );
+    }
 
     /// Settings → About no longer stacks a star card over the board: the
     /// Star control lives on the Source row beside the GitHub link

@@ -95,11 +95,27 @@ stores the widths so the same text at two pitches cannot share a layout. Zero
 widths anchor to the preceding cell; every glyph takes its cluster's column.
 Replay these two files when re-vendoring.
 
+## 6. `src/text_system/line.rs` + `src/elements/text.rs` — background chips
+
+Upstream paints a run's `background_color` as a hard rectangle the full line
+height tall, from the run's first glyph to the next run. Inline code (#168)
+wants a chip instead: rounded, a little wider than the glyphs, fitted to the
+text's own height. `TextBackgroundChip` (`line.rs`) carries the radius, the
+padding and the one background colour it applies to; `paint_line_background`
+takes it as an option and turns only runs with exactly that colour into chips,
+so a text selection, a terminal cell or any other wash keeps the plain
+rectangle. `WrappedLine::paint_background_with_chips` and
+`StyledText::with_background_chips` (`text.rs`) are the opt-in entry points;
+every existing call passes no chip and paints exactly as upstream. Paint-only:
+glyph positions never move. Replay these two files when re-vendoring.
+
 ## Re-verifying a re-vendor
 
 - `cargo clippy --lib -p gpui --no-deps -- -D warnings` is clean, so the
   vendored crate can be checked on its own rather than only through the app.
 - `cargo test -p orbit-pi glass` covers the marker contract and the theme gate.
+- `cargo test -p orbit-pi --bin orbit-pi background_chip inline_code_chip`
+  covers the chip geometry and which runs take it.
 - Launch with a wallpaper (Settings → Appearance) and confirm the sidebar and
   composer smear the image behind them, with the wallpaper beside them sharp.
 - The pass is macOS-only by construction: `backdrop_blur_supported()` is false

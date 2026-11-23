@@ -55,10 +55,13 @@ python3 scripts/check_hovers.py
 python3 scripts/check_i18n.py
 ```
 
-`cargo build` with zero warnings is a stated project invariant. CI runs build
-and clippy on macOS, plus `check_i18n.py` and the extension tests in a `checks`
-job (`.github/workflows/ci.yml`). The design guards are local-only — run them
-before a UI change lands; CI does not gate on them. Other tests run locally.
+`cargo build` with zero warnings is a stated project invariant. CI builds on
+macOS, Linux and Windows, runs clippy on macOS, and runs `check_i18n.py`,
+`check_ui_layers.py`, `check_ui_owners.py` and the extension tests in a
+`checks` job, plus `cargo audit` (`.github/workflows/ci.yml`); the required
+`build` check fails if any of them does. The other design guards are
+local-only — run them before a UI change lands; CI does not gate on them.
+Other tests run locally.
 
 For UI changes, read `DESIGN.md` first — it is the design system, and the state,
 motion and modal contracts in it are enforced by the guards above. Then launch the

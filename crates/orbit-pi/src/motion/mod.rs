@@ -8,7 +8,10 @@
 //!   it, so a transition and a chart cannot drift apart.
 //! * [`Transition`] — a one-shot value change that can be interrupted: a
 //!   reversal resumes from the value on screen, not from `from`.
-//! * [`Travel`] — the offset a card entering from its anchor starts at.
+//! * [`Travel`] — the offset a card entering from its anchor starts at, and
+//!   [`arrive`] for a surface that has no anchor to come from.
+//! * [`panel::slide`] — a panel's open and close, as the extent (width or
+//!   height) it takes from its neighbour.
 //!
 //! [`registry`] keeps a [`Transition`] alive across frames, keyed by element.
 //!
@@ -17,10 +20,14 @@
 
 pub(crate) mod ease;
 pub(crate) mod interactive;
+pub(crate) mod panel;
 pub(crate) mod registry;
 pub(crate) mod reveal;
 pub(crate) mod transition;
 
 // The front door.
-pub(crate) use interactive::{blend, control, hover, state, Hover};
-pub(crate) use reveal::enter;
+pub(crate) use interactive::{
+    blend, control, fade, follow, hover, state, Hover, Hovered,
+};
+pub(crate) use panel::{slide, Anchor, Mount, Slide};
+pub(crate) use reveal::{arrive, enter};

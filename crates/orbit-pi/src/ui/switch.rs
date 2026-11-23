@@ -1,7 +1,13 @@
 //! The shared switch control.
+//!
+//! From Uiverse.io by RaspberryBee - https://uiverse.io/RaspberryBee/calm-deer-81
+//! MIT License, Copyright (c) RaspberryBee
+//!
+//! Adapted from HTML/CSS to GPUI: the em-based geometry is kept as ratios of
+//! the track height, and the colors map to theme roles instead of literals.
 
 use gpui::{
-    div, prelude::FluentBuilder, px, AnyElement, App, InteractiveElement, IntoElement, MouseButton,
+    div, px, AnyElement, App, InteractiveElement, IntoElement, MouseButton,
     ParentElement, Pixels, RenderOnce, SharedString, Styled, Window,
 };
 
@@ -9,11 +15,11 @@ use crate::theme::{
     tokens::{DynamicSpacing, Motion},
     Theme,
 };
-use crate::ui::style::control::ControlExt;
 
-/// The app's one switch: a 36×20 track and a 14px knob that travels between the
-/// ends on [`Motion::Interaction`], with the track cross-fading from
-/// `surface_elevated` to `accent`.
+/// The app's one switch: a rounded-rectangle track (3.5 × 2 em, with `em` half
+/// the track height) and a rounded-square knob (1.4 em, inset 0.3 em) that
+/// slides 1.5 em on [`Motion::Travel`] while the track cross-fades from
+/// `text_disabled` (off) to `success` (on).
 ///
 /// The settings switches (Reduce Motion, automatic updates, a skill's or a
 /// subagent's enablement) all render through this, so a switch cannot drift in
@@ -68,9 +74,7 @@ impl RenderOnce for Switch {
             )
             .read(cx)
             .clone();
-        let focused = focus.is_focused(window);
-        let padding = DynamicSpacing::Base02.px(&theme);
-        let travel = switch_travel(&theme);
+        let geometry = SwitchGeometry::new(&theme);
         let selector = id.clone();
         let track = div()
             .id(gpui::ElementId::Name(id.clone()))
@@ -78,20 +82,17 @@ impl RenderOnce for Switch {
             .debug_selector(move || selector.to_string())
             .track_focus(&focus)
             .key_context("Switch")
-            .w(px(36.))
-            .h(DynamicSpacing::Base20.px(&theme))
-            .rounded_full()
-            .p(padding)
+            .w(geometry.width)
+            .h(geometry.height)
+            .rounded(geometry.track_radius)
+            // The 1px edge only shows the focus ring; the inset is measured
+            // from the outer edge, so the padding gives that pixel back.
+            .p(geometry.inset - px(1.))
             .border_1()
+            .border_color(gpui::transparent_black())
             .flex()
             .items_center()
             .cursor_pointer()
-            // Focus wins over the hover edge, so the ring never blinks off
-            // under the pointer.
-            .when(focused, |track| track.border_color(theme.focus_ring))
-            .when(!focused, |track| {
-                track.border_color(theme.hairline()).hover_border(&theme)
-            })
             .on_mouse_up(MouseButton::Left, {
                 let on_toggle = on_toggle.clone();
                 move |_, window, cx| on_toggle(window, cx)
@@ -101,62 +102,82 @@ impl RenderOnce for Switch {
             track,
             id,
             &theme,
-            Motion::Interaction,
+            Motion::Travel,
             if on { 1.0 } else { 0.0 },
             move |track, value| {
                 track
                     .bg(crate::motion::blend(
-                        theme.surface_elevated,
-                        theme.accent,
+                        theme.text_disabled,
+                        theme.success,
                         value,
                     ))
                     .child(
                         div()
                             .flex_none()
-                            .size(px(14.))
-                            .rounded_full()
+                            .size(geometry.knob)
+                            .rounded(geometry.knob_radius)
                             .bg(theme.toggle_knob)
                             // Relative, so the knob travels without re-laying out the
                             // track — and without moving the hitbox the click lands on.
                             .relative()
-                            .left(travel * value),
+                            .left(geometry.travel * value),
                     )
             },
         )
     }
 }
 
-/// How far a switch's knob travels: the track, less its padding and the knob.
-fn switch_travel(theme: &Theme) -> Pixels {
-    px(36.) - DynamicSpacing::Base02.px(theme) * 2.0 - px(14.)
+/// The switch's shape, in the source design's em ratios with `em` = half the
+/// track height, so the whole control follows the spacing density.
+#[derive(Clone, Copy)]
+struct SwitchGeometry {
+    width: Pixels,
+    height: Pixels,
+    knob: Pixels,
+    inset: Pixels,
+    travel: Pixels,
+    track_radius: Pixels,
+    knob_radius: Pixels,
+}
+
+impl SwitchGeometry {
+    fn new(theme: &Theme) -> Self {
+        let height = DynamicSpacing::Base20.px(theme);
+        let em = height * 0.5;
+        Self {
+            width: em * 3.5,
+            height,
+            knob: em * 1.4,
+            inset: em * 0.3,
+            travel: em * 1.5,
+            // 10px and 8px at the source's 17px font size.
+            track_radius: em * (10. / 17.),
+            knob_radius: em * (8. / 17.),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A switch's knob travels the track's inner span, and the span has to stay
-    /// positive at every spacing density the user can choose — at Compact the
-    /// padding shrinks and the knob has further to go, not less.
+    /// The knob is inset equally at both ends of its travel at every spacing
+    /// density, so it lands flush at the far edge, never past it.
     #[test]
     fn a_switch_knob_travels_the_tracks_inner_span() {
         for density in crate::theme::SPACING_DENSITIES {
             let mut theme = Theme::dark();
             theme.ui.spacing_density = density;
-            let travel = switch_travel(&theme);
-            let padding = DynamicSpacing::Base02.px(&theme);
+            let g = SwitchGeometry::new(&theme);
+            assert!(g.travel > px(0.), "no travel at {density}% density");
+            // Track = inset + knob + travel + inset.
+            let span = g.inset + g.knob + g.travel + g.inset;
             assert!(
-                travel > px(0.),
-                "the knob would fall off the track at {density}% density"
-            );
-            // Track = padding + knob + travel + padding.
-            assert_eq!(
-                padding + px(14.) + travel + padding,
-                px(36.),
+                (span - g.width).abs() < px(0.01),
                 "the knob must land flush with the far edge at {density}%"
             );
+            // Vertically centered with the same inset.
+            assert!((g.inset * 2.0 + g.knob - g.height).abs() < px(0.01));
         }
-        // The default density is the geometry the design system states.
-        assert_eq!(switch_travel(&Theme::dark()), px(18.));
     }
 }

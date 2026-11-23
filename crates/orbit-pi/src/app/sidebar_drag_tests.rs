@@ -45,7 +45,6 @@ impl gpui::Render for HeaderProbe {
             &Rc::default(),
             &Rc::default(),
             &Rc::default(),
-            &Rc::default(),
             None,
             None,
             &SidebarDragPaint {
@@ -137,7 +136,6 @@ impl gpui::Render for SessionProbe {
             false,
             false,
             false,
-            &Rc::default(),
             &Rc::default(),
             &Rc::default(),
             &Rc::default(),

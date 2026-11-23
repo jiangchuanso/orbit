@@ -92,6 +92,35 @@ where
         .into_any_element()
 }
 
+/// A surface that arrives in place: a page, a settings section.
+///
+/// A popover travels out of the control that opened it, because the eye needs to
+/// know where it came from. A page was already where it is — the card around it
+/// is chrome that never moves — so it only fades. That is also the honest limit
+/// on this toolkit: the surface a navigation replaced is gone on the same frame,
+/// and gpui cannot cross-fade an element that no longer exists. What arrives is
+/// therefore a fade in over the card's own canvas, not a dissolve between two
+/// pages.
+///
+/// `name` is the destination, not the moment. A page swapped for another and
+/// then swapped back plays its entrance again, because its animation state left
+/// with the element; a page whose content merely updates — typing in Settings →
+/// Search — keeps its clock, so it does not re-fade on every keystroke.
+///
+/// Reduce Motion paints the arrived state: no animation element is mounted, and
+/// the page is opaque on the frame it opens.
+pub(crate) fn arrive<T>(
+    element: T,
+    name: impl Into<SharedString>,
+    theme: &Theme,
+    role: Motion,
+) -> AnyElement
+where
+    T: Styled + IntoElement + 'static,
+{
+    enter(element, name, theme, role, None)
+}
+
 /// The paint for a point on an entrance: its opacity, and the offset it still
 /// has to travel.
 fn entrance_frame(progress: f32, travel: Option<Travel>) -> (f32, Point<Pixels>) {
@@ -151,11 +180,70 @@ mod tests {
         assert_eq!((opacity, offset), (1.0, point(px(0.0), px(0.0))));
     }
 
+    /// A page that moved as it arrived would reflow everything under it, and the
+    /// card around it never moves. This is the guard for that decision: the
+    /// surface measures the same with the entrance as without.
+    #[gpui::test]
+    fn an_arrival_fades_without_moving_the_surface(cx: &mut gpui::TestAppContext) {
+        use gpui::{
+            div, point, size, AppContext as _, InteractiveElement as _, ParentElement as _,
+        };
+
+        struct Probe {
+            theme: Theme,
+            arriving: bool,
+        }
+
+        impl gpui::Render for Probe {
+            fn render(
+                &mut self,
+                _: &mut gpui::Window,
+                _: &mut gpui::Context<Self>,
+            ) -> impl IntoElement {
+                let page = div().size(px(200.)).flex().flex_col().child(
+                    div()
+                        .size(px(120.))
+                        .debug_selector(|| "arrive-inner".into()),
+                );
+                if self.arriving {
+                    arrive(page, "arrive-probe", &self.theme, Motion::Layout)
+                } else {
+                    page.into_any_element()
+                }
+            }
+        }
+
+        let theme = Theme::dark();
+        let viewport = size(px(300.), px(200.));
+
+        let cx = cx.add_empty_window();
+        cx.draw(point(px(0.), px(0.)), viewport, |_, cx| {
+            cx.new(|_| Probe {
+                theme,
+                arriving: false,
+            })
+        });
+        let resting = cx.debug_bounds("arrive-inner").expect("the box lays out");
+
+        let cx = cx.add_empty_window();
+        cx.draw(point(px(0.), px(0.)), viewport, |_, cx| {
+            cx.new(|_| Probe {
+                theme,
+                arriving: true,
+            })
+        });
+        let arriving = cx.debug_bounds("arrive-inner").expect("the box lays out");
+
+        assert_eq!(
+            arriving, resting,
+            "a page fades in place: an entrance that moved it would reflow the layout under it"
+        );
+    }
+
     #[test]
     fn an_entrance_without_travel_only_fades() {
         let (opacity, offset) = entrance_frame(0.5, None);
         assert_eq!(opacity, 0.5);
         assert_eq!(offset, point(px(0.0), px(0.0)));
     }
-
 }

@@ -23,7 +23,7 @@ use crate::theme::{
     Theme,
 };
 use crate::ui::icon::icon;
-use crate::ui::style::control::{ControlExt, TipExt};
+use crate::ui::style::control::TipExt;
 
 /// A settings label and optional supporting text beside an intrinsic-size control.
 pub(crate) fn setting_row(
@@ -99,11 +99,11 @@ pub(crate) fn picker_entry<E: Styled + InteractiveElement>(el: E, theme: &Theme)
         .items_center()
         .gap(list_item::content_gap(theme))
         .text_size(picker::TEXT.px(theme))
-        .focus_state(theme)
 }
 
-/// One fixed text line box inside a picker row, at the Comfortable leading
-/// [`picker::two_line_entry_height`] measures. Used by [`PickerRow`].
+/// One fixed text line box inside a one-line picker row, at the Comfortable
+/// leading [`picker::entry_height`] centres. A two-line row stacks its lines
+/// on [`picker::stack_line_height`] instead. Used by [`PickerRow`].
 fn picker_line_height(size: TextSize, theme: &Theme) -> gpui::Pixels {
     BufferLineHeight::Comfortable.resolve(size.px(theme))
 }
@@ -112,13 +112,13 @@ fn picker_line_height(size: TextSize, theme: &Theme) -> gpui::Pixels {
 /// a badge, a count, a check. Exactly the title's line box tall, so in a
 /// two-line row these sit level with the title instead of floating between
 /// the title and the detail line. The row puts its children at the top
-/// (`items_start`); a one-line row is unchanged, since its single line is the
-/// whole row.
+/// (`items_start`). Only two-line rows carry it, so it takes the stacked
+/// title's line box.
 pub(crate) fn picker_title_slot(theme: &Theme) -> gpui::Div {
     div()
         .debug_selector(|| "picker-title-slot".to_string())
         .flex_none()
-        .h(picker_line_height(picker::TEXT, theme))
+        .h(picker::stack_line_height(picker::TEXT, theme))
         .flex()
         .items_center()
         .gap(list_item::content_gap(theme))
@@ -250,13 +250,21 @@ impl PickerRow {
         };
         let gap = list_item::content_gap(theme);
         let icon_size = context_menu::ICON.px(theme);
+        // A lone title fills the row's Comfortable line; over a detail line
+        // the pair stacks on the tighter leading, so the caption reads as the
+        // title's own.
+        let title_h = if self.detail.is_some() {
+            picker::stack_line_height(picker::TEXT, theme)
+        } else {
+            picker_line_height(picker::TEXT, theme)
+        };
         let leading = self.mark.map(|mark| match mark {
             MarkElement::Image(logo) => div()
                 .debug_selector(|| "picker-row-leading".to_string())
                 .flex_none()
                 // Exactly the title's line box, so the mark and the title
                 // share one optical line whatever the row's total height.
-                .h(picker_line_height(picker::TEXT, theme))
+                .h(title_h)
                 .flex()
                 .items_center()
                 .child(
@@ -270,7 +278,7 @@ impl PickerRow {
             MarkElement::Icon(path) => div()
                 .debug_selector(|| "picker-row-leading".to_string())
                 .flex_none()
-                .h(picker_line_height(picker::TEXT, theme))
+                .h(title_h)
                 .flex()
                 .items_center()
                 .child(icon(path, icon_size, theme.text_muted))
@@ -283,7 +291,7 @@ impl PickerRow {
                     .flex_none()
                     // Exactly the title's line box, so the glyph and the title
                     // share one optical line whatever the row's total height.
-                    .h(picker_line_height(picker::TEXT, theme))
+                    .h(title_h)
                     .flex()
                     .items_center()
                     .child(icon(path, icon_size, color))
@@ -301,7 +309,7 @@ impl PickerRow {
                 .pl(indent)
                 .truncate()
                 .text_size(picker::SECONDARY_TEXT.px(theme))
-                .line_height(picker_line_height(picker::SECONDARY_TEXT, theme))
+                .line_height(picker::stack_line_height(picker::SECONDARY_TEXT, theme))
                 .text_color(self.detail_color)
                 .child(detail);
             if self.detail_mono {
@@ -333,7 +341,7 @@ impl PickerRow {
                             .min_w_0()
                             .truncate()
                             .font_weight(self.weight)
-                            .line_height(picker_line_height(picker::TEXT, theme))
+                            .line_height(title_h)
                             .text_color(self.title_color)
                             .child(self.title),
                     ),
@@ -387,9 +395,13 @@ pub(crate) fn option_row(
             .min_w_0()
             .flex()
             .flex_col()
+            // The name and its description stack on the two-line leading, the
+            // same rhythm as every other two-line picker row; the leading is
+            // the only space between them.
             .child(
                 div()
                     .font_weight(FontWeight::MEDIUM)
+                    .line_height(picker::stack_line_height(picker::TEXT, theme))
                     .text_color(if lit {
                         theme.text_primary
                     } else {
@@ -399,9 +411,9 @@ pub(crate) fn option_row(
             )
             .child(
                 div()
-                    .mt(DynamicSpacing::Base02.px(theme))
                     .whitespace_normal()
                     .text_size(picker::SECONDARY_TEXT.px(theme))
+                    .line_height(picker::stack_line_height(picker::SECONDARY_TEXT, theme))
                     .text_color(if lit {
                         theme.text_primary.opacity(0.75)
                     } else {
@@ -505,22 +517,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_cursor_changes_the_hairline_never_the_geometry() {
+    fn a_nav_row_reserves_a_clear_edge_and_draws_no_ring() {
         use gpui::{div, Styled};
         for id in crate::theme::ThemeId::ALL {
             let theme = Theme::for_id(id);
             for height in [NavRowHeight::Header, NavRowHeight::Item] {
-                let mut rest = nav_row(div(), &theme, height, false);
-                let mut cursor = nav_row(div(), &theme, height, true);
-                let (rest, cursor) = (rest.style(), cursor.style());
-                assert_eq!(rest.min_size, cursor.min_size, "{id:?} {height:?}");
+                let mut row = nav_row(div(), &theme, height);
+                let style = row.style();
                 assert_eq!(
-                    rest.border_widths, cursor.border_widths,
-                    "{id:?} {height:?}"
+                    style.border_widths.left,
+                    Some(crate::theme::tokens::BORDER_WIDTH.into()),
+                    "{id:?} {height:?}: the 1px edge is reserved"
                 );
-                assert_eq!(rest.corner_radii, cursor.corner_radii, "{id:?} {height:?}");
-                assert_eq!(cursor.border_color, Some(theme.focus_ring));
-                assert_eq!(rest.border_color.map(|c| c.a), Some(0.));
+                assert_eq!(style.border_color.map(|c| c.a), Some(0.), "and clear");
             }
         }
     }
@@ -529,8 +538,8 @@ mod tests {
     fn items_share_one_height_and_headers_are_shorter() {
         use gpui::{div, Styled};
         let theme = Theme::dark();
-        let mut item = nav_row(div(), &theme, NavRowHeight::Item, false);
-        let mut header = nav_row(div(), &theme, NavRowHeight::Header, false);
+        let mut item = nav_row(div(), &theme, NavRowHeight::Item);
+        let mut header = nav_row(div(), &theme, NavRowHeight::Header);
         assert_eq!(
             item.style().min_size.height,
             Some(ButtonSize::Medium.height(&theme).into())
@@ -597,23 +606,19 @@ impl NavRowHeight {
 
 /// The frame of a navigation row (sidebar sessions, project headers, the
 /// "Show more" / "Show less" rows): full width, at least its height, the list
-/// item's corners, a centered row, and a 1px hairline reserved in every state
-/// so the keyboard cursor's focus ring never shifts the text.
+/// item's corners, a centered row, and a clear 1px edge reserved in every
+/// state, so the row keeps the geometry it was laid out at.
 ///
 /// The caller keeps the padding and gap (a header's glyph sits further out
 /// than a session's), the id, and every handler — rows here are drag handles,
 /// drop targets and context-menu anchors, so the frame is a style seam rather
 /// than a wrapper. Fill is [`nav_row_fill`], faded in with `motion::hover`.
-pub(crate) fn nav_row<E: Styled>(el: E, theme: &Theme, height: NavRowHeight, cursor: bool) -> E {
+pub(crate) fn nav_row<E: Styled>(el: E, theme: &Theme, height: NavRowHeight) -> E {
     el.w_full()
         .min_h(height.size().height(theme))
         .rounded(list_item::RADIUS.px(theme))
         .border_1()
-        .border_color(if cursor {
-            theme.focus_ring
-        } else {
-            gpui::transparent_black()
-        })
+        .border_color(gpui::transparent_black())
         .flex()
         .items_center()
 }

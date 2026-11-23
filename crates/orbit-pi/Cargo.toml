@@ -1,6 +1,6 @@
 [package]
 name = "orbit-pi"
-version = "0.2.20"
+version = "0.2.21"
 description = "Native GPUI workbench for the pi coding agent"
 edition.workspace = true
 license.workspace = true
@@ -133,6 +133,10 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSPasteboard",
     "NSPasteboardItem",
     "NSSound",
+    # Spelling marks in the composer (`spellcheck.rs`): the composer paints its
+    # own text, so AppKit never spell-checks it on its own. `NSSpellChecker` is
+    # the only checker macOS exposes and it needs no new crate generation.
+    "NSSpellChecker",
     "NSWorkspace",
     "block2",
     "objc2-core-graphics",

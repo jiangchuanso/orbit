@@ -42,12 +42,15 @@ use crate::ui::resize::{resize_handle, ResizeAxis, ResizeLook};
 use crate::ui::style::surface::SurfaceExt;
 use crate::ui::tree::{TreeNode, TreeRow, TreeRowState};
 
-/// Panel width defaults / drag clamps.
-pub const PANEL_DEFAULT_W: f32 = 248.;
-/// The narrowest dock that still fits the header: the workspace name beside
-/// New File, New Folder, "…" and Close. A narrower saved width (the old
-/// minimum was 172) is clamped up to this on load.
-pub const PANEL_MIN_W: f32 = 220.;
+/// Panel width defaults / drag clamps. The default matches the layout
+/// presets' Explorer width.
+pub const PANEL_DEFAULT_W: f32 = 280.;
+/// The narrowest dock: room for a readable workspace name (about 120px)
+/// beside New File, New Folder, "…" and Close, and for a nested file name
+/// three levels deep. The drag clamps to it, a narrower saved width (older
+/// minimums were 172 and 220) is clamped up on load, and the dock's root
+/// holds it as a hard floor so no surrounding layout can squeeze it.
+pub const PANEL_MIN_W: f32 = 260.;
 pub const PANEL_MAX_W: f32 = 460.;
 
 /// Fixed tree row height — 28px, the design system's navigation-row height.
@@ -1155,18 +1158,21 @@ impl ProjectPanel {
     }
 
     /// The filter: an inset, rounded field on the panel's nested surface,
-    /// whose hairline takes the focus ring while it holds the caret.
-    fn filter_row(&self, theme: Theme, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    /// with a quiet hairline (no focus ring while it holds the caret).
+    ///
+    /// It shares the tree's edges: the field's box sits on the same 4px inset
+    /// as a row's hover box, and the search glyph lands on the column the
+    /// rows' chevrons start in, so the panel reads as two edges, not four.
+    fn filter_row(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
         let has_text = !self.filter.read(cx).text().is_empty();
-        let focused = gpui::Focusable::focus_handle(self.filter.read(cx), cx).is_focused(window);
         div()
             .flex_none()
-            .px(DynamicSpacing::Base08.px(&theme))
+            .px(DynamicSpacing::Base04.px(&theme))
             .pb(DynamicSpacing::Base06.px(&theme))
             .child(
                 div()
                     .h(ButtonSize::Medium.height(&theme))
-                    .pl(DynamicSpacing::Base08.px(&theme))
+                    .pl(DynamicSpacing::Base06.px(&theme))
                     .pr(DynamicSpacing::Base02.px(&theme))
                     .flex()
                     .items_center()
@@ -1174,11 +1180,7 @@ impl ProjectPanel {
                     .rounded(input::RADIUS.px(&theme))
                     .bg(theme.page_fill(theme.surface_secondary))
                     .border_1()
-                    .border_color(if focused {
-                        theme.focus_ring
-                    } else {
-                        theme.hairline_subtle()
-                    })
+                    .border_color(theme.hairline_subtle())
                     .overflow_hidden()
                     .text_size(TextSize::Small.px(&theme))
                     .child(icon(
@@ -1207,15 +1209,16 @@ impl ProjectPanel {
 
     fn tree(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
         let entity = cx.entity().downgrade();
-        let list = virtual_list(self.list.clone(), move |index, window, cx| {
+        let list = virtual_list(self.list.clone(), move |index, _window, cx| {
             entity
                 .upgrade()
-                .map(|entity| entity.update(cx, |this, cx| this.render_row(index, window, cx)))
+                .map(|entity| entity.update(cx, |this, cx| this.render_row(index, cx)))
                 .unwrap_or_else(|| div().into_any_element())
         })
         .w_full()
         .py(DynamicSpacing::Base04.px(&theme));
         let no_files_detail = tr!("explorer.no_files_detail");
+        let query = self.filter.read(cx).text().trim().to_string();
         let body: AnyElement = if self.loading && self.rows.is_empty() {
             loading_state(&theme)
         } else if let Some(error) = &self.error {
@@ -1226,6 +1229,21 @@ impl ProjectPanel {
                 Some(error.as_str()),
                 EmptyFill::Full,
             )
+        } else if self.rows.is_empty() && !query.is_empty() {
+            // A filter that matches nothing is not an empty workspace: say
+            // what was searched and how to get the tree back.
+            let detail = tr!("explorer.no_matches_detail");
+            div()
+                .debug_selector(|| "explorer-no-matches".to_string())
+                .size_full()
+                .child(empty_state(
+                    theme,
+                    "icons/search.svg",
+                    &tr!("explorer.no_matches", query = query),
+                    Some(detail.as_str()),
+                    EmptyFill::Full,
+                ))
+                .into_any_element()
         } else if self.rows.is_empty() {
             empty_state(
                 theme,
@@ -1331,7 +1349,7 @@ impl ProjectPanel {
             .into_any_element()
     }
 
-    fn render_row(&self, index: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         let Some(row) = self.rows.get(index).cloned() else {
             return div().h(px(ROW_H)).into_any_element();
         };
@@ -1383,8 +1401,7 @@ impl ProjectPanel {
         .height(px(ROW_H))
         .state(state)
         .guides(true)
-        .editor(entry_input)
-        .focus_ring(active && cursor && !renaming && self.focus.is_focused(window));
+        .editor(entry_input);
         if row.is_dir() && row.dirty {
             tree_row = tree_row.trailing(
                 div()
@@ -1406,7 +1423,10 @@ impl ProjectPanel {
         }
         let mut content = tree_row.render(&theme).w_full();
         if !renaming {
+            // A name the dock's width ellipsizes is still reachable: the
+            // row's tooltip carries its full workspace-relative path.
             content = content
+                .tip(row.path.clone())
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     // Clicking away from an open prompt cancels it rather than
                     // activating the row under the pointer.
@@ -1683,9 +1703,10 @@ fn loading_state(theme: &Theme) -> AnyElement {
 
 impl Render for ProjectPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.open {
-            return div().into_any_element();
-        }
+        // No `!self.open` short circuit: the app decides when the panel is in
+        // the tree. While it is closing the dock slides shut over 200 ms
+        // (`motion::panel::slide`), and returning nothing here would leave an
+        // empty frame travelling to zero.
         if self
             .focus_subscriptions
             .as_ref()
@@ -1701,14 +1722,21 @@ impl Render for ProjectPanel {
         // The filter is read here; the observer marks rows dirty on change.
         self.refresh_rows(cx);
         let theme = *theme::get(cx);
+        // The dock is the row's last card, so it keeps the card gutter on
+        // every open side: beside its neighbour, at the window's right edge
+        // and at its bottom edge.
+        let gutter = crate::theme::tokens::panel::gutter(&theme);
         div()
             .id("project-panel")
             .debug_selector(|| "project-panel".into())
             .relative()
             .flex_none()
             .w(self.width)
+            .min_w(px(PANEL_MIN_W))
             .h_full()
-            .pl(DynamicSpacing::Base12.px(&theme))
+            .pl(gutter)
+            .pr(gutter)
+            .pb(gutter)
             .flex()
             .flex_col()
             .min_h_0()
@@ -1722,10 +1750,10 @@ impl Render for ProjectPanel {
                 .absolute()
                 .top_0()
                 .bottom_0()
-                // Sit on the card's left border (the 12px gutter, minus
-                // half the handle width), not the panel's outer edge, so
-                // the edge users see is the edge they can grab.
-                .left(px(9.))
+                // Sit on the card's left border (the gutter, minus half the
+                // handle width), not the panel's outer edge, so the edge
+                // users see is the edge they can grab.
+                .left(gutter - px(3.))
                 .w(px(6.))
                 .on_drag(ExplorerResize, |_, _, _, cx| cx.new(|_| ExplorerDragGhost)),
             )
@@ -1747,7 +1775,7 @@ impl Render for ProjectPanel {
                             .flex()
                             .flex_col()
                             .child(self.header(theme, cx))
-                            .child(self.filter_row(theme, window, cx))
+                            .child(self.filter_row(theme, cx))
                             .child(self.tree(theme, cx))
                             .child(self.footer(theme, cx)),
                     ),
@@ -1876,6 +1904,79 @@ mod tests {
         assert_eq!(parent_of("a/b/c.rs"), "a/b");
     }
 
+    /// The dock never draws narrower than its minimum, even when a width
+    /// below it reaches the panel (an old saved width, a direct assignment):
+    /// the root holds `PANEL_MIN_W` as a hard floor, and `set_width` clamps.
+    #[gpui::test]
+    fn the_dock_holds_its_minimum_width(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        cx.update(|_, app| app.set_global(theme::Theme::for_id(theme::ThemeId::Orbit)));
+        let panel = cx.update(|_, app| {
+            app.new(|cx| {
+                ProjectPanel::new(Rc::new(|_, _, _| {}), Rc::new(|_, _| {}), Rc::new(|_| {}), cx)
+            })
+        });
+        cx.update(|_, app| {
+            panel.update(app, |panel, cx| {
+                panel.open = true;
+                panel.width = px(120.);
+                panel.stale = false;
+                cx.notify();
+            })
+        });
+        let drawn = panel.clone();
+        cx.draw(gpui::point(px(0.), px(0.)), gpui::size(px(800.), px(600.)), move |_, _| {
+            drawn.clone()
+        });
+        let bounds = cx.debug_bounds("project-panel").expect("the dock");
+        assert!(
+            f32::from(bounds.size.width) >= PANEL_MIN_W,
+            "the dock is {:?} wide",
+            bounds.size.width
+        );
+        cx.update(|_, app| {
+            panel.update(app, |panel, cx| {
+                panel.set_width(px(100.), cx);
+                assert_eq!(panel.width(), px(PANEL_MIN_W), "a drag clamps to the floor");
+            })
+        });
+    }
+
+    /// A filter that matches nothing says so — it is not an empty workspace.
+    #[gpui::test]
+    fn a_filter_with_no_matches_names_it(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join("orbit-explorer-no-matches");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("main.rs"), "").unwrap();
+        let cx = cx.add_empty_window();
+        cx.update(|_, app| app.set_global(theme::Theme::for_id(theme::ThemeId::Orbit)));
+        let panel = cx.update(|_, app| {
+            app.new(|cx| {
+                ProjectPanel::new(Rc::new(|_, _, _| {}), Rc::new(|_, _| {}), Rc::new(|_| {}), cx)
+            })
+        });
+        let snapshot = walk::snapshot(&root, false);
+        cx.update(|_, app| {
+            panel.update(app, |panel, cx| {
+                panel.open = true;
+                panel.width = px(280.);
+                panel.workspace = Some(root.clone());
+                panel.index = TreeIndex::build(snapshot, HashMap::new());
+                panel.stale = false;
+                panel.filter.update(cx, |input, cx| input.set_text("zzz-no-such-file", cx));
+                panel.refresh_rows(cx);
+                cx.notify();
+            })
+        });
+        let drawn = panel.clone();
+        cx.draw(gpui::point(px(0.), px(0.)), gpui::size(px(280.), px(600.)), move |_, _| {
+            drawn.clone()
+        });
+        assert!(cx.debug_bounds("explorer-no-matches").is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// A `ComposerInput` has no intrinsic width, so on a content-sized row its
     /// `flex_1` collapses to zero and the inline prompt shows only the devicon.
     /// Render the real panel and assert both prompts get a usable width.
@@ -1936,8 +2037,8 @@ mod tests {
     }
 
     #[gpui::test]
-    fn open_file_focus_ring_tracks_tree_focus_and_cursor(cx: &mut gpui::TestAppContext) {
-        let root = std::env::temp_dir().join("orbit-explorer-focus-ring");
+    fn the_tree_draws_no_focus_ring(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join("orbit-explorer-no-focus-ring");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("main.rs"), "fn main() {}\n").unwrap();
@@ -1945,8 +2046,9 @@ mod tests {
 
         // `draw` accumulates debug bounds, so use a fresh window for each
         // state rather than treating old bounds as the current frame.
+        // Focused or not, on the open file or another: no ring, ever.
         for (focused, cursor_path, expected_ring) in [
-            (true, "main.rs", true),
+            (true, "main.rs", false),
             (false, "main.rs", false),
             (true, "other.rs", false),
         ] {

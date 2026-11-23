@@ -322,3 +322,38 @@ fn the_alternate_send_shows_only_mid_run_with_a_payload(cx: &mut gpui::TestAppCo
         "the alternate leads the primary"
     );
 }
+
+/// Mid-run with a draft, the composer's three send-area controls — the
+/// alternate lane, the primary send and Stop — are one height on one centre
+/// line, and Stop is the same 28px circle an icon-only send is (#166).
+#[gpui::test]
+fn send_and_stop_share_one_height_and_centre(cx: &mut gpui::TestAppContext) {
+    let mut theme = Theme::for_id(ThemeId::Orbit);
+    // Reduced motion paints the send morph at rest on the first frame.
+    theme.ui.motion = crate::theme::MotionPreference::Reduced;
+    cx.update(|cx| cx.set_global(theme));
+    let window = cx.add_empty_window();
+    let app = window.update(|_, cx| cx.new(OrbitApp::new));
+    window.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.busy = true;
+            app.input.update(cx, |input, cx| input.set_text("nudge", cx));
+        })
+    });
+    let draw = app.clone();
+    let _ = window.draw(
+        gpui::point(gpui::px(0.), gpui::px(0.)),
+        gpui::size(gpui::px(1200.), gpui::px(820.)),
+        move |_, _| draw,
+    );
+    let send = window.debug_bounds("send-btn").expect("send");
+    let stop = window.debug_bounds("stop-btn").expect("stop");
+    let alternate = window.debug_bounds("send-alternate-btn").expect("alternate lane");
+    let side = crate::theme::tokens::ButtonSize::Medium.height(&theme);
+    assert_eq!(stop.size.width, side, "Stop is a circle of the control height");
+    assert_eq!(stop.size.height, side);
+    for (name, bounds) in [("send", send), ("alternate", alternate)] {
+        assert_eq!(bounds.size.height, side, "{name} shares Stop's height");
+        assert_eq!(bounds.center().y, stop.center().y, "{name} shares Stop's centre line");
+    }
+}

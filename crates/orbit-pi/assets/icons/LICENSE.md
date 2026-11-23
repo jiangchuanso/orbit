@@ -7,3 +7,7 @@ Unlimited personal and commercial use; no attribution required.
 other icon here. License: CC0 1.0 Universal (public domain dedication).
 The PowerShell and Windows marks are absent from Simple Icons (withdrawn under
 its trademark policy), so those shells fall back to `terminal.svg`.
+
+`stop-square.svg` is Orbit's own: a plain filled rounded square for the
+composer's Stop control (the HugeIcons free set has only the outlined square,
+which Orbit uses to mean *failed*). Same license as the rest of Orbit.

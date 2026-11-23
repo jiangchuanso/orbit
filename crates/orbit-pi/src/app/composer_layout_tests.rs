@@ -937,3 +937,73 @@ fn the_send_control_keeps_the_button_padding_gap_and_centre(cx: &mut gpui::TestA
         .expect("the alternate lane is labelled too");
     assert!(alternate.size.width > px(0.));
 }
+
+/// The model picker opens wholly above its chip, even when the window is too
+/// short for its six-row list. gpui's `anchored` only snaps a menu that does
+/// not fit back into the window, which used to slide it down over the chip, so
+/// the click meant to close the picker landed on the picker instead.
+#[gpui::test]
+fn the_model_picker_never_covers_its_chip(cx: &mut gpui::TestAppContext) {
+    use crate::theme::{Theme, ThemeId};
+
+    // Reduce Motion measures where the picker rests: its entrance otherwise
+    // starts a few pixels low and travels up into place, and a test frame
+    // drawn mid-entrance would read that travel as an overlap.
+    let mut theme = Theme::for_id(ThemeId::Orbit);
+    theme.ui.motion = crate::theme::MotionPreference::Reduced;
+    cx.update(|cx| cx.set_global(theme));
+    for height in [420., 520., 900.] {
+        let cx = cx.add_empty_window();
+        cx.simulate_resize(gpui::size(px(960.), px(height)));
+        let app = cx.update(|_, cx| {
+            cx.new(|cx| {
+                let mut app = OrbitApp::new(cx);
+                for dependency in &mut app.deps {
+                    dependency.installed = true;
+                }
+                app.setup_open = false;
+                app.layout_restored = true;
+                app.sidebar_visible = false;
+                app.current_workspace = Some(std::env::temp_dir());
+                app.transcript.append_user_message("earlier", Vec::new());
+                app.available_models = (0..40)
+                    .map(|i| ModelEntry {
+                        id: format!("model-{i}"),
+                        name: format!("Model {i}"),
+                        provider: "openai".into(),
+                        context_window: Some(500_000),
+                        thinking_levels: Vec::new(),
+                    })
+                    .collect();
+                app.model_label = "Model 20".into();
+                app.model_id = "model-20".into();
+                app.model_provider = "openai".into();
+                app
+            })
+        });
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            let _ = cx.draw(
+                point(px(0.), px(0.)),
+                gpui::size(px(960.), px(height)),
+                |_, _| app.clone(),
+            );
+        };
+        // The chip lays out (and records its edge) before the picker opens,
+        // exactly as it does in the running app.
+        draw(cx);
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| app.open_picker(PickerKind::Model, window, cx))
+        });
+        draw(cx);
+        let chip = cx.debug_bounds("model-chip").expect("model chip");
+        let surface = cx.debug_bounds("picker-surface").expect("model picker");
+        assert!(
+            surface.bottom() <= chip.top(),
+            "the picker covers its chip in a {height}px window: {surface:?} vs {chip:?}"
+        );
+        assert!(
+            surface.top() >= px(0.),
+            "the picker leaves the window in a {height}px window: {surface:?}"
+        );
+    }
+}

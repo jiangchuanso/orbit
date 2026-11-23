@@ -41,8 +41,9 @@ contract changes. Preserve Orbit's identity unless a redesign is requested.
 - **Premium means precise:** clear hierarchy, aligned edges, coherent rhythm,
   careful typography, immediate feedback, predictable behavior and polished
   empty/error states. Frost and soft shadows express depth without obscuring data.
-- **Native and keyboard-first:** keep focus visible, distinct from selection;
-  preserve platform conventions, text editing, shortcuts and focus restoration.
+- **Native and keyboard-first:** keyboard focus moves everywhere but is not
+  painted (Orbit draws no focus ring, by product decision); preserve platform
+  conventions, text editing, shortcuts and focus restoration.
   A command-palette route complements rather than automatically replaces a
   usable keyboard path through a flow.
 - **Context before clutter:** reveal secondary actions where relevant without
@@ -65,16 +66,16 @@ Resolve tokens through the current theme and verify scaling at the call site.
 | Color | Semantic `Theme` roles for canvas, surfaces, text, border, focus, action, selection, status, code and syntax across thirteen dark and light palettes. Accent and action are separate roles. See §Colour roles and theme compatibility. |
 | Text | `TextSize`: 11, 12, 14, 16px default reference, plus UI/editor preferences. `HeadlineSize` and `BufferLineHeight` provide additional scales. UI and monospace families serve different roles. |
 | Spacing | `DynamicSpacing`: 0, 1, 2, 3, 4, 6, 8, 12, 16, 20, 24, 32, 40, 48 at default settings; density and UI scaling apply. |
-| Radius | `Radius::px`: 4, 6, 9, 12px, and full, before the corner-rounding preference. Use component role tokens rather than assuming a radius from an enum name. |
+| Radius | `Radius::px`: 4, 6, 9, 12px, and full, fixed (no user preference). Use component role tokens rather than assuming a radius from an enum name. |
 | Controls | `ButtonSize` reference heights: 16, 18, 22, 28, 32px; `IconSize` has 10, 12, 14, 16 and 48px plus custom. |
-| Border and focus | `BORDER_WIDTH` is 1px, and the focus ring is a `BORDER_WIDTH` border in `focus_ring`. Validate that focus remains visible in real contexts rather than copying a web outline rule. |
+| Border and focus | `BORDER_WIDTH` is 1px. Orbit paints no focus ring: keyboard focus moves but is not drawn, and focusable controls keep a transparent reserved 1px edge (`focus_ring_reserved`) so geometry never changes. |
 | Depth | Quiet structural surfaces; `ElevationIndex` gives floating surfaces and modals soft shadows. |
 | Motion | `Motion`: 150ms interaction, 200ms layout, 260ms travel (50ms instant is specified but not built); reduced motion resolves centrally. Loops and chart cadences have separate contracts. |
 
 The values above are resolved by their respective tokens; they do not all scale
 in the same way. `TextSize::XSmall` resolves to 11px despite its stale 10px
-comment. A palette never changes geometry, but user font size, spacing density
-and corner-rounding preferences can. Do not hardcode reference dimensions in
+comment. A palette never changes geometry, but user font size and spacing
+density preferences can. Do not hardcode reference dimensions in
 new components where a semantic token already exists.
 
 ### Normative scale and role mapping
@@ -86,10 +87,10 @@ All pixel values here are base values before user preferences, unless noted.
 | UI typography | Default 14px, large 16px, small 12px, extra-small 11px; use `TextSize` and user-adjustable UI/editor sizes. Use the UI family for interface text and the monospace family for code; preserve platform fallback. |
 | Headings and leading | Use `TextSize::Large` for page titles and `HeadlineSize` for modal headlines. Buffer line-height roles are 1.3 (`Standard`) and 1.618 (`Comfortable`); select per context and respect custom settings. Do not apply global tracking. |
 | Density | `DynamicSpacing` resolves the listed 14-step scale at compact 80%, default 100%, and comfortable 120%, interpolating between anchors before UI font scaling. Use semantic gaps and insets consistently. |
-| Corners | `Small` 4, `Medium` 6, `Large` 9, `XLarge` 12, `Full` 9999px. The corner-rounding preference adds up to 4px to non-full steps; it is not density- or font-scaled. |
+| Corners | `Small` 4, `Medium` 6, `Large` 9, `XLarge` 12, `Full` 9999px. Fixed: no preference, density or font size scales them. |
 | Component corners | Compact/none buttons and list entries use `Medium` 6px; default/medium/large buttons and inputs use `Large` 9px; the chat composer has a fixed 12px radius independent of preferences; panels use `XLarge` 12px; modal cards use 16px; badges are fully rounded. Resolve through component tokens. |
 | Controls | Button heights are `None` 16, `Compact` 18, `Default` 22, `Medium` 28 and `Large` 32px before UI scaling. Match the icon to the button's `icon_size`; the icon scale is 10, 12, 14, 16 and 48px, plus custom. Visual size is not proof of usable hit area. |
-| Edges and depth | Borders and focus rings are 1px. Keep structural regions calm; floating surfaces combine frosted or opaque fills with a fine edge and a soft shadow. Focus remains distinct from selection. |
+| Edges and depth | Borders are 1px; no focus ring is painted. Keep structural regions calm; floating surfaces combine frosted or opaque fills with a fine edge and a soft shadow. |
 | Motion | Interaction 150ms, layout 200ms and travel 260ms, all decelerating; instant (50ms, linear) is specified but not built — add it to `Motion` with its first caller. Hover, press, focus and selection do not use travel; a control changing size and meaning may. No bounce by default. Reduced motion resolves to the end state. |
 
 ### Colour roles and theme compatibility
@@ -104,13 +105,13 @@ and their reference values are `DESIGN.md` §Colors.
 | Panel and chrome | `surface` | Sidebars, panes, title bar, composer. This is Orbit's secondary background. |
 | Nested container | `surface_secondary` | A well inside a panel, not a substitute for one. |
 | Card, chip, menu, popover, dialog | `surface_elevated` | The one raised plane. Reach it through `ElevationIndex` / `StyledExt`, which also supply the hairline and the layer's shadow. |
-| Row and control states | `surface_hover`, `surface_active`, `surface_selected` | Pointer, pressed/open, open row. Choose a treatment, not a role: see §The State Contract in `DESIGN.md`. A faceless row or control reads them through `hover_wash()` / `pressed_wash()` / `selected_wash()`, which turn into ink washes on glass; a floating layer's builder scopes its theme with `Theme::for_floating()`. |
+| Row and control states | `surface_hover`, `surface_active`, `surface_selected` | Pointer, pressed/open, open row. Choose a treatment, not a role: see §The State Contract in `DESIGN.md`. A faceless row or control reads them through `hover_wash()` / `pressed_wash()` / `selected_wash()`, which turn into ink washes on glass; a control with its own face (buttons, chips, segmented groups, fields) resolves it through `control_face()` / `control_inset()`, which turn into glass faces there too; a floating layer's builder scopes its theme with `Theme::for_floating()`. |
 | Edges | `border`, `border_subtle`, `border_strong` | Region seam, quiet internal rule, floating-surface edge. |
 | Ink | `text_primary`, `text_secondary`, `text_muted`, `text_disabled` | Emphasis comes from ink weight and size, never from hue. |
 | Accent | `accent`, `accent_hover`, `accent_pressed`, `accent_fg`, `accent_text` | `accent_text` is the readable role for links, icons, keywords and mentions; `accent` is a fill, and never an automatic primary-button fill. |
 | Primary action | `action`, `action_hover`, `action_pressed`, `action_fg` | A palette may key this to its accent or to a neutral step; the separation is what lets an identity keep its buttons. |
 | Status | `success`, `warning`, `error`, `error_hover`, `error_fg`, `info` | `error` is the danger role. Status reinforces a label that already reads; it is never the only signal. |
-| Focus | `focus_ring` | Distinct from selection and from the resting hairline; 1px, no layout cost. |
+| Focus | `focus_ring` | Defined and contrast-tested, but no component paints it: Orbit draws no focus ring (product decision). Do not reintroduce one without the user asking. |
 | Text selection | `selection`, `selection_fg` | A text wash (transcript, editor, terminal), not a surface. |
 | Translucency | `overlay`, `overlay_strong` | Ink at low alpha for controls floating over the wallpaper; never a slab over a panel. |
 
@@ -149,8 +150,8 @@ consecutive ramp step — `surface_elevated` → `surface_hover` →
 the muted ink that is read on top of it.
 
 **The Geometry Rule.** A palette never changes geometry. A role change may not
-move a border, a radius, a size or a line height; only the user's font size,
-spacing density and corner-rounding preferences do.
+move a border, a radius, a size or a line height; only the user's font size
+and spacing density preferences do.
 
 ## Component and interaction contract
 
@@ -159,7 +160,8 @@ disabled, loading and error when relevant. Use shared interaction/state helpers;
 do not invent per-surface colors or duplicate controls when an existing primitive
 fits. Keep text and icons legible against each actual state and palette.
 
-- Keep focus, selection and hover distinguishable; restore focus on dismissal.
+- Keep selection and hover distinguishable; restore focus on dismissal. Focus
+  itself is not painted (no focus ring).
 - Make icon-only controls identifiable to keyboard and assistive technology;
   expose shortcut hints when useful, but never rely on hover-only tooltips.
 - Keep long paths, branch names, errors and localized text inspectable through a
@@ -180,14 +182,13 @@ fits. Keep text and icons legible against each actual state and palette.
 - Do not claim a control is accessible without testing the path.
 
 **Status:** the tokens and shared helpers exist. The shared switch is a tab
-stop with a visible focus ring and flips with Space or Enter, but it has no
+stop and flips with Space or Enter (no focus ring is painted), but it has no
 native accessible name. GPUI 0.2.2 has no
 ready-made native accessibility tree API; a platform bridge remains unverified.
 Treat screen-reader support and complete keyboard flows as requirements to
 implement and test, not as shipped features. In Explorer, an open file row uses
 `surface_selected`, an unselected keyboard-cursor row uses `overlay`, and a
-rename row uses `surface_active`. When the tree is focused and its cursor is on
-the open file, a focus ring overlays the selected fill without changing layout.
+rename row uses `surface_active`. No focus ring is drawn on the tree.
 
 ## Component index
 
@@ -206,8 +207,8 @@ existing components before creating a new primitive.
 | Transcript edge | Above the composer, the existing 3rem bottom settle appears only while scrolled away from the live edge. With wallpaper glass, smoothly blend sharp into frosted backdrop from top to bottom over the original unclipped bounds; add no palette wash or black dimming. Use one Gaussian pass, not stacked strips or blur animation. Without glass or renderer support, retain the composited-page fade. Let the jump button supply its own contrast; the composer follows its glass contract. |
 | New-task page | The same composer in the middle of the page, not a second template: the chat column with an empty transcript, centered by flex weights (`new_task::settle`) at `new_task::COMPOSER_MAX_W` and narrowing with the window. Its context header shares the composer surface: folder and branch controls on the left, and the working-directory control on the right when in a repository. The location control names the project at its main checkout and the worktree inside a linked worktree; its picker retains the Local row. The folder control opens the workspace picker beneath itself; the status row does not duplicate these controls. No headline, mark or card above it. The composer border remains a quiet hairline while its input is focused; the caret indicates text focus. The empty footer leaves out the context meter until real usage exists. The first send docks the composer into the session layout on one `Travel` clock; Reduce Motion paints the session frame at once. |
 | Dialogs | Identify the task and affected object; keep actions in a predictable footer. Trap focus while modal and restore it on close. Escape and scrim clicks cancel dismissible dialogs; a mandatory or in-progress dialog may prevent dismissal when interruption would be unsafe, while explaining the state and any available action. Make destructive consequences explicit. Verify the actual focus and keyboard implementation. |
-| Rows, tables and lists | Use shared list metrics and interaction states; keep hover, selection and focus distinct, metadata readable, and dense content inspectable. Use stable alignment and keyboard-accessible disclosure for truncated values. Picker rows sit `picker::row_gap` apart and only the highlight fills one — the row in force is said by its check, Medium weight and brighter ink, never by a second filled slab. A two-line row's trailing note, badge, count or check goes in `picker_title_slot`, on the title's line. Leading marks in one list are one icon family (stroke glyphs); a logo stays on its chip. In a dense list, status words take the quiet `experimental_tag`, not the warning badge. |
-| Toggles, tooltips and feedback | Inspect `ui/switch.rs`, `empty_state` and `error_state` in `app/helpers.rs`, and `ui/tooltip.rs`. `switch` provides the visual, pointer and keyboard behavior (Tab focus, focus ring, Space/Enter), not an accessible name; supply or record that separately. Give switches clear state, avoid hover-only essential information, and place actionable errors near their cause. Use loading feedback without unnecessary layout shifts. |
+| Rows, tables and lists | Use shared list metrics and interaction states; keep hover, selection and focus distinct, metadata readable, and dense content inspectable. Use stable alignment and keyboard-accessible disclosure for truncated values. Picker rows sit `picker::row_gap` apart and only the highlight fills one — the row in force is said by its check, Medium weight and brighter ink, never by a second filled slab. A two-line row stacks its title and caption on `picker::STACK_LEADING` (`Standard`, 1.3×) through `picker::stack_line_height`, never the `Comfortable` leading a one-line row is centred in, and adds no margin between them; its trailing note, badge, count or check goes in `picker_title_slot`, on the title's line. Leading marks in one list are one icon family (stroke glyphs); a logo stays on its chip. In a dense list, status words take the quiet `experimental_tag`, not the warning badge. |
+| Toggles, tooltips and feedback | Inspect `ui/switch.rs`, `empty_state` and `error_state` in `app/helpers.rs`, and `ui/tooltip.rs`. `switch` provides the visual, pointer and keyboard behavior (Tab focus, Space/Enter; no focus ring), not an accessible name; supply or record that separately. Give switches clear state, avoid hover-only essential information, and place actionable errors near their cause. Use loading feedback without unnecessary layout shifts. |
 
 ## Icon policy
 
@@ -267,7 +268,7 @@ shipped tokens or instructions to add abstractions prematurely:
    line height, long translations, large text, fallback fonts and tabular numbers
    where GPUI/font support is confirmed. Avoid a global tracking adjustment.
 2. **Radius roles:** map actual control, input, menu, panel, dialog and composer
-   uses to resolved tokens, including rounding preferences. Keep documentation
+   uses to resolved tokens. Keep documentation
    aligned with `Radius::px`. No new radius is justified solely to match Apple
    or Linear.
 3. **Spacing and hit targets:** document semantic inset/gap roles and practical
@@ -320,7 +321,12 @@ disclosure chevron (no frame, no open fill); its only leading glyph is a state �
 the spinner while live, the failure mark once a call failed — never one icon
 per work kind. A command row's one-line preview drops a `cd <workspace> &&`
 prelude and leading `export NAME=…` clauses (`command_preview`); a `cd`
-elsewhere stays, and the open detail always shows the full command. The folded
+elsewhere stays, and the open detail always shows the full command — once: an
+open command card drops the header's preview, and its command block has no
+label (the `$` names it) and floats its copy control in the corner. Command
+output does not wrap: each line is one row that scrolls sideways (a plain
+wheel still scrolls the transcript), and a leading `path:line:` location takes
+the comment ink (`location_prefix_len`). The folded
 preview is one `text_secondary` ink in the code face: syntax color belongs to
 the open detail only. A file path inside the workspace reads from its root
 (`workspace_relative_path`). An open text `read` is bare code (`read_listing`): no
@@ -335,8 +341,8 @@ ink; only a live thought shows its elapsed time, and its caret follows the
 shared `disclosure_chevron` reading (`›` folded, `⌄` open); the reader's own toggle wins either way. All
 three disclosures — the summary line, a tool row with detail, a thought row —
 are keyboard stops through `ActivityToggleKeys`: Tab reaches them, Enter or
-Space folds them, a focused one wears the 1px `focus_ring` without moving
-layout, and a pointer click leaves keyboard focus where it was. A tool row with
+Space folds them (no focus ring is painted), and a pointer click leaves
+keyboard focus where it was. A tool row with
 no detail is not a stop. Native accessible names remain a GPUI gap. It frosts under the *floating* rule — over a wallpaper the
 wallpaper contract decides; with none, dark palettes on a renderer with a
 backdrop pass frost, and light palettes, Reduce Transparency and Increase

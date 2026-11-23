@@ -1103,7 +1103,7 @@ impl OrbitApp {
         // Outlined to sit beside the labelled Add button at the same weight.
         .border_1()
         .border_color(theme.hairline())
-        .raised(theme.surface_elevated, &theme);
+        .raised(theme.control_face(theme.surface_elevated), &theme);
 
         let add = Button::keyed("mcp-add", ButtonVariant::Primary)
 .size(ButtonSize::Large)
@@ -1883,7 +1883,6 @@ impl OrbitApp {
                     .child(
                         input_field_frame(div(), &theme)
                             .w_full()
-                            .bg(theme.background)
                             .items_start()
                             .child(input),
                     );
@@ -2095,7 +2094,6 @@ impl OrbitApp {
                     .border_1()
                     .border_color(gpui::transparent_black())
                     .focusable()
-                    .focus(|style| style.border_color(theme.focus_ring))
                     .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                     .cursor_pointer()
                     .when(selected, |row| row.bg(theme.selected_wash()))
@@ -2183,7 +2181,6 @@ impl OrbitApp {
                     .border_1()
                     .border_color(gpui::transparent_black())
                     .focusable()
-                    .focus(|style| style.border_color(theme.focus_ring))
                     .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                     .cursor_pointer()
                     .when(selected, |row| row.bg(theme.selected_wash()))

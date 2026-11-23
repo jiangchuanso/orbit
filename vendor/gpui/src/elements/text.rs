@@ -2,7 +2,8 @@ use crate::{
     ActiveTooltip, AnyView, App, Bounds, DispatchPhase, Element, ElementId, GlobalElementId,
     HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Size, TextOverflow,
-    TextRun, TextStyle, TooltipId, WhiteSpace, Window, WrappedLine, WrappedLineLayout,
+    TextBackgroundChip, TextRun, TextStyle, TooltipId, WhiteSpace, Window, WrappedLine,
+    WrappedLineLayout,
     register_tooltip_mouse_handlers, set_tooltip_on_window,
 };
 use anyhow::Context as _;
@@ -150,6 +151,7 @@ pub struct StyledText {
     runs: Option<Vec<TextRun>>,
     delayed_highlights: Option<Vec<(Range<usize>, HighlightStyle)>>,
     layout: TextLayout,
+    background_chip: Option<TextBackgroundChip>,
 }
 
 impl StyledText {
@@ -160,7 +162,16 @@ impl StyledText {
             runs: None,
             delayed_highlights: None,
             layout: TextLayout::default(),
+            background_chip: None,
         }
+    }
+
+    /// Orbit patch: paint every run's `background_color` as `chip` — a
+    /// rounded shape fitted to the text — instead of a plain rectangle the
+    /// line's full height. Paint-only; layout is unchanged.
+    pub fn with_background_chips(mut self, chip: TextBackgroundChip) -> Self {
+        self.background_chip = Some(chip);
+        self
     }
 
     /// Get the layout for this element. This can be used to map indices to pixels and vice versa.
@@ -295,7 +306,8 @@ impl Element for StyledText {
         window: &mut Window,
         cx: &mut App,
     ) {
-        self.layout.paint(&self.text, window, cx)
+        self.layout
+            .paint_with_chips(&self.text, self.background_chip, window, cx)
     }
 }
 
@@ -443,6 +455,16 @@ impl TextLayout {
     }
 
     fn paint(&self, text: &str, window: &mut Window, cx: &mut App) {
+        self.paint_with_chips(text, None, window, cx)
+    }
+
+    fn paint_with_chips(
+        &self,
+        text: &str,
+        chip: Option<TextBackgroundChip>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
         let element_state = self.0.borrow();
         let element_state = element_state
             .as_ref()
@@ -457,11 +479,12 @@ impl TextLayout {
         let mut line_origin = bounds.origin;
         let text_style = window.text_style();
         for line in &element_state.lines {
-            line.paint_background(
+            line.paint_background_with_chips(
                 line_origin,
                 line_height,
                 text_style.text_align,
                 Some(bounds),
+                chip,
                 window,
                 cx,
             )

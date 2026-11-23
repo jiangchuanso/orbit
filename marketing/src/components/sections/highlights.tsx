@@ -70,7 +70,7 @@ function StatTile({ value, label, rest }: { value: string; label: string; rest: 
   return (
     <article className="flex flex-col justify-center gap-6 overflow-hidden rounded-[18px] border border-edge-default bg-surface-1 p-7">
       <div className="flex items-baseline gap-3 whitespace-nowrap">
-        <span className="text-[88px] font-semibold leading-[0.9] tracking-[-0.05em] text-ink">
+        <span className="text-[64px] font-semibold leading-[0.9] tracking-[-0.045em] text-ink">
           {value}
         </span>
         <span className="text-[20px] font-medium tracking-[-0.01em] text-ink-2">{label}</span>

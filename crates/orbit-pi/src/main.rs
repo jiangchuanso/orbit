@@ -68,6 +68,7 @@ mod gh;
 mod gh_templates;
 mod git;
 mod git_accounts;
+mod git_activity;
 mod git_ops;
 mod git_panel;
 mod hidden_models;
@@ -119,6 +120,7 @@ mod sessions;
 mod shimmer;
 mod sidepane;
 mod skills;
+mod spellcheck;
 mod subagent;
 mod subagent_log;
 mod subagent_file;
@@ -402,7 +404,9 @@ actions!(
         SidebarClose,
         SidebarMoveRowUp,
         SidebarMoveRowDown,
-        SidebarOpenRowMenu
+        SidebarOpenRowMenu,
+        SidebarPreviewUp,
+        SidebarPreviewDown
     ]
 );
 
@@ -674,6 +678,10 @@ pub(crate) fn bind_keys(cx: &mut App) {
         // what dragging a header or a session row does (issue #143).
         KeyBinding::new("alt-up", SidebarMoveRowUp, Some("Sidebar")),
         KeyBinding::new("alt-down", SidebarMoveRowDown, Some("Sidebar")),
+        // The arrows are spent moving the row cursor, so the session preview
+        // scrolls by the page. Nothing else in the sidebar pages.
+        KeyBinding::new("pageup", SidebarPreviewUp, Some("Sidebar")),
+        KeyBinding::new("pagedown", SidebarPreviewDown, Some("Sidebar")),
         // Shift-F10 / the Menu key open the cursor row's context menu — the
         // keyboard route to what a right-click opens.
         KeyBinding::new("shift-f10", SidebarOpenRowMenu, Some("Sidebar")),
@@ -803,6 +811,10 @@ fn main() {
         // Adopt the persisted interface language before the first paint (and
         // before the menu bar below reads its labels).
         i18n::set_language(theme::get(cx).ui.language);
+        // The composer spell-checks its own text through AppKit, which a unit
+        // test has no window server for. This is the running app on the main
+        // thread, so the platform checker may be used from here on.
+        spellcheck::start();
         // Install the native menu bar after the keymap exists so each item
         // picks up its key equivalent.
         set_app_menus(cx);

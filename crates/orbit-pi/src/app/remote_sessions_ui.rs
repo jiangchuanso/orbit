@@ -387,7 +387,6 @@ pub(super) fn render_remote_host_row(
                 .cursor_pointer()
                 .border_1()
                 .border_color(theme.hairline().opacity(0.))
-                .when(cursor, |row| row.border_color(theme.focus_ring))
                 .on_mouse_up(MouseButton::Left, move |_, _, cx| {
                     toggle.update(cx, |app, cx| {
                         app.toggle_remote_session_group(&toggle_name, cx)
@@ -448,7 +447,6 @@ pub(super) fn render_remote_session_row(
     row: &RemoteSessionRow,
     active: bool,
     this: &Entity<OrbitApp>,
-    cursor: bool,
     theme: Theme,
 ) -> AnyElement {
     let open = this.clone();
@@ -465,7 +463,6 @@ pub(super) fn render_remote_session_row(
         .rounded(list_item::RADIUS.px(&theme))
         .border_1()
         .border_color(theme.hairline().opacity(0.))
-        .when(cursor, |card| card.border_color(theme.focus_ring))
         .when(active, |card| card.bg(theme.selected_wash()))
         .flex()
         .items_center()
