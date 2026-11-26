@@ -163,9 +163,20 @@ impl Verification {
 /// install state.
 pub fn agent_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("PI_CODING_AGENT_DIR").filter(|v| !v.is_empty()) {
-        return PathBuf::from(dir);
+        return expand_tilde(PathBuf::from(dir));
     }
     crate::platform::home_dir().join(".pi").join("agent")
+}
+
+/// Expand a leading `~` the way pi does in its own path settings: pi resolves
+/// `PI_CODING_AGENT_DIR=~/pi` against the home directory, so reading the value
+/// verbatim would look for a directory literally named `~` and quietly find an
+/// empty store while pi keeps writing to the real one.
+pub(crate) fn expand_tilde(path: PathBuf) -> PathBuf {
+    match path.strip_prefix("~") {
+        Ok(rest) => crate::platform::home_dir().join(rest),
+        Err(_) => path,
+    }
 }
 
 /// Managed install roots to check, most-specific first.
@@ -631,6 +642,25 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, body).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// `PI_CODING_AGENT_DIR=~/pi` is the natural spelling and pi resolves it
+    /// against the home directory. Reading it verbatim would point the session
+    /// index at a directory literally named `~`.
+    #[test]
+    fn a_tilde_in_the_agent_dir_is_expanded_the_way_pi_expands_it() {
+        let home = crate::platform::home_dir();
+        assert_eq!(expand_tilde(PathBuf::from("~/pi")), home.join("pi"));
+        assert_eq!(expand_tilde(PathBuf::from("~")), home);
+        // Anything else is left exactly as given.
+        assert_eq!(
+            expand_tilde(PathBuf::from("/tmp/pi")),
+            PathBuf::from("/tmp/pi")
+        );
+        assert_eq!(
+            expand_tilde(PathBuf::from("relative/pi")),
+            PathBuf::from("relative/pi")
+        );
     }
 
     #[test]

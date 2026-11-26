@@ -16,6 +16,11 @@
 #   NOTARY_PROFILE  notarytool keychain profile; when set, each .app and DMG
 #                   is notarized and stapled (otherwise notarization is
 #                   skipped with a warning and Gatekeeper warns on other Macs)
+#   SKIP_BUILD=1    package binaries that are already built instead of running
+#                   cargo: target/<triple>/release/orbit-pi must exist for every
+#                   triple the chosen DMGs need (the release workflow builds
+#                   each architecture in its own parallel job and drops the
+#                   binaries there)
 #
 set -euo pipefail
 
@@ -136,15 +141,60 @@ EOF
   codesign "${args[@]}" "$out"
 }
 
+# --- hdiutil hardening -----------------------------------------------------
+# Hosted macOS runners intermittently fail `hdiutil create` with
+# "create failed - Resource busy": the APFS container is momentarily busy and
+# an otherwise fine image aborts the whole release
+# (actions/runner-images#7522). It is infrastructure flakiness, not a bad
+# build, so retry it with a backoff instead of failing the job on the first hit.
+HDUITIL_CREATE_TRIES="${HDUITIL_CREATE_TRIES:-5}"
+
+# A volume of the same name left mounted by an earlier pass shadows the next
+# one — and Finder, started by the layout AppleScript, is the usual holder.
+# Clear leftovers before creating, and force-detach when a plain detach sticks.
+detach_stale_volumes() {
+  local vol
+  for vol in /Volumes/"$APP_NAME"*; do
+    [ -d "$vol" ] || continue
+    warn "detaching leftover mount: $vol"
+    hdiutil detach -force "$vol" >/dev/null 2>&1 || true
+  done
+  sleep 1
+}
+
+hdiutil_create() {
+  local attempt=1
+  local err_file="$BUILD_ROOT/hdiutil-create.err"
+  while :; do
+    if hdiutil create "$@" >/dev/null 2>"$err_file"; then
+      rm -f "$err_file"
+      return 0
+    fi
+    if [ "$attempt" -ge "$HDUITIL_CREATE_TRIES" ]; then
+      cat "$err_file" >&2
+      rm -f "$err_file"
+      return 1
+    fi
+    warn "hdiutil create failed (attempt $attempt/$HDUITIL_CREATE_TRIES): $(tail -n 1 "$err_file") — retrying"
+    detach_stale_volumes
+    sleep $((attempt * 3))
+    attempt=$((attempt + 1))
+  done
+}
+
 # --- wrap a signed .app into a DMG -----------------------------------------
 make_dmg() {
   local app="$1"
   local dmg="$2"
+  local label="$3"
 
   info "Creating DMG: $dmg"
   rm -f "$dmg"
-  local dmg_stage="$BUILD_ROOT/dmg-stage"
-  local rw="$BUILD_ROOT/rw.dmg"
+  # Per-label paths: the arm64 and universal passes must not share a staging
+  # directory or a writable image, so a leftover from one cannot wedge the
+  # other.
+  local dmg_stage="$BUILD_ROOT/dmg-stage-$label"
+  local rw="$BUILD_ROOT/rw-$label.dmg"
   local mnt="/Volumes/$APP_NAME"
   rm -rf "$dmg_stage" "$rw"
   mkdir -p "$dmg_stage"
@@ -156,13 +206,14 @@ make_dmg() {
   cp "$DMG_BG" "$dmg_stage/.background/$DMG_BG_NAME"
 
   # Finder can only lay out a writable HFS+ image; compress it afterwards.
-  hdiutil create \
+  detach_stale_volumes
+  hdiutil_create \
     -volname "$APP_NAME" \
     -srcfolder "$dmg_stage" \
     -fs HFS+ \
     -format UDRW \
     -ov \
-    "$rw" >/dev/null
+    "$rw" || die "hdiutil create failed for $dmg_stage"
   # A volume of the same name from a previous run would shadow this one.
   if [ -d "$mnt" ]; then hdiutil detach "$mnt" >/dev/null 2>&1 || true; fi
   hdiutil attach "$rw" -readwrite -noverify -noautoopen >/dev/null
@@ -206,7 +257,12 @@ EOF
   SetFile -a C "$mnt" || warn "SetFile failed — the DMG header icon stays generic"
   sync
   rm -rf "$mnt/.fseventsd" "$mnt/.Trashes" 2>/dev/null || true
-  hdiutil detach "$mnt" >/dev/null
+  # A plain detach can lose the race against Finder still holding the volume;
+  # force it rather than shipping an image built on a half-written volume.
+  if ! hdiutil detach "$mnt" >/dev/null 2>&1; then
+    warn "detach of $mnt needs -force"
+    hdiutil detach -force "$mnt" >/dev/null 2>&1 || die "could not detach $mnt"
+  fi
   hdiutil convert "$rw" -format UDZO -ov -o "$dmg" >/dev/null
   rm -f "$rw"
 
@@ -265,7 +321,7 @@ build_and_package() {
   notarize_app "$app"
 
   local dmg="$DIST/${APP_NAME}-${VERSION}-${label}.dmg"
-  make_dmg "$app" "$dmg"
+  make_dmg "$app" "$dmg" "$label"
   notarize_dmg "$dmg"
 
   # Updater payload: a .tar.gz whose single top-level entry is the .app. The
@@ -281,32 +337,53 @@ build_and_package() {
 }
 
 # --- build the release binaries -------------------------------------------
+case "$TARGET" in
+  arm64|universal|both) ;;
+  *) die "unknown target '$TARGET' (expected arm64, universal or both)" ;;
+esac
+
 mkdir -p "$BUILD_ROOT" "$DIST"
+
+release_binary() { printf '%s' "$ROOT/target/$1/release/$EXEC_NAME"; }
+
+# Build one triple's release binary, or with SKIP_BUILD=1 check that a
+# prebuilt one is in place. `rebuild=0` reuses a binary this run already built.
+ensure_binary() {
+  local triple="$1"
+  local rebuild="${2:-1}"
+  local binary
+  binary="$(release_binary "$triple")"
+  if [[ "${SKIP_BUILD:-0}" == "1" ]]; then
+    [[ -f "$binary" ]] || die "SKIP_BUILD=1 but no prebuilt binary at $binary"
+    info "Using prebuilt release ($triple)"
+    chmod +x "$binary"
+    return 0
+  fi
+  if [[ "$rebuild" == "0" && -f "$binary" ]]; then
+    return 0
+  fi
+  info "Building release ($triple)…"
+  cargo build --release -p orbit-pi --target "$triple"
+}
 
 # arm64 (Apple Silicon)
 if [[ "$TARGET" == "arm64" || "$TARGET" == "both" ]]; then
-  info "Building release (aarch64-apple-darwin)…"
-  cargo build --release -p orbit-pi --target aarch64-apple-darwin
+  ensure_binary aarch64-apple-darwin
   build_and_package "arm64" "aarch64-apple-darwin" \
-    "$ROOT/target/aarch64-apple-darwin/release/$EXEC_NAME"
+    "$(release_binary aarch64-apple-darwin)"
 fi
 
 # universal (arm64 + x86_64)
 if [[ "$TARGET" == "universal" || "$TARGET" == "both" ]]; then
   # lipo needs an arm64 slice; build it unless the arm64 DMG already did.
-  if [[ ! -f "$ROOT/target/aarch64-apple-darwin/release/$EXEC_NAME" ]]; then
-    info "Building release (aarch64-apple-darwin)…"
-    cargo build --release -p orbit-pi --target aarch64-apple-darwin
-  fi
-
-  info "Building release (x86_64-apple-darwin)…"
-  cargo build --release -p orbit-pi --target x86_64-apple-darwin
+  ensure_binary aarch64-apple-darwin 0
+  ensure_binary x86_64-apple-darwin
 
   info "Combining universal binary with lipo…"
   uni="$BUILD_ROOT/${EXEC_NAME}-universal"
   lipo -create \
-    "$ROOT/target/aarch64-apple-darwin/release/$EXEC_NAME" \
-    "$ROOT/target/x86_64-apple-darwin/release/$EXEC_NAME" \
+    "$(release_binary aarch64-apple-darwin)" \
+    "$(release_binary x86_64-apple-darwin)" \
     -output "$uni"
 
   build_and_package "universal" "universal" "$uni"

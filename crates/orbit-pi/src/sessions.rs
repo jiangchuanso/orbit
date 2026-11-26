@@ -1,7 +1,9 @@
 //! Session discovery — reads pi's own session store from disk.
 //!
-//! Layout: `~/.pi/agent/sessions/<workspace-slug>/<timestamp>_<uuid>.jsonl`
-//! where `<workspace-slug>` is the workspace absolute path with `/` → `-`.
+//! Layout: `<agent dir>/sessions/<workspace-slug>/<timestamp>_<uuid>.jsonl`,
+//! where `<agent dir>` is `PI_CODING_AGENT_DIR` or its `~/.pi/agent` default
+//! (the directory pi resolves for itself) and `<workspace-slug>` is the
+//! workspace absolute path with `/` → `-`.
 //! Each file is JSONL; the first line is the session header
 //! (`{"type":"session","id":…,"cwd":…}`) followed by entries
 //! (`message`, `model_change`, …). Titles come from pi's own auto-title
@@ -50,11 +52,13 @@ pub struct SessionInfo {
 
 /// The default pi session store.
 pub fn sessions_dir() -> PathBuf {
-    dirs_home().join(".pi/agent/sessions")
+    sessions_dir_from(std::env::var_os("PI_CODING_AGENT_SESSION_DIR").as_deref())
 }
 
-fn dirs_home() -> PathBuf {
-    crate::platform::home_dir()
+fn sessions_dir_from(dir: Option<&std::ffi::OsStr>) -> PathBuf {
+    dir.filter(|dir| !dir.is_empty())
+        .map(|dir| crate::pi_install::expand_tilde(PathBuf::from(dir)))
+        .unwrap_or_else(|| crate::pi_install::agent_dir().join("sessions"))
 }
 
 /// Load every session in pi's store, newest-*user message* first.
@@ -817,6 +821,22 @@ pub fn relative_time(modified: SystemTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_dir_override_expands_a_leading_tilde() {
+        assert_eq!(sessions_dir_from(Some(std::ffi::OsStr::new("~/pi-sessions"))), crate::platform::home_dir().join("pi-sessions"));
+    }
+
+    #[test]
+    fn session_dir_override_keeps_absolute_paths() {
+        assert_eq!(sessions_dir_from(Some(std::ffi::OsStr::new("/tmp/pi-sessions"))), PathBuf::from("/tmp/pi-sessions"));
+    }
+
+    #[test]
+    fn session_dir_falls_back_to_the_agent_store() {
+        assert_eq!(sessions_dir_from(None), crate::pi_install::agent_dir().join("sessions"));
+        assert_eq!(sessions_dir_from(Some(std::ffi::OsStr::new(""))), sessions_dir_from(None));
+    }
 
     #[test]
     fn session_dir_exists_on_dev_machine() {

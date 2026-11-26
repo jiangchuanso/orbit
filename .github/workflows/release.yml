@@ -10,7 +10,9 @@ name: Release
 # Actions tab (workflow_dispatch). Cargo.toml is the single source of truth:
 # the workflow creates the annotated tag `v<version>` at the commit it built,
 # so tags are never hand-cut. A manual run rebuilds a draft left by an earlier
-# run; a published release is never rebuilt. macOS produces signed +
+# run; a published release is never rebuilt. macOS compiles the arm64 and
+# x86_64 binaries in two parallel jobs (macos-build), then one job lipos,
+# packages, signs and notarizes them. macOS produces signed +
 # notarized arm64 and universal DMGs when the signing secrets exist and Apple
 # accepts them, signed but un-notarized ones when Apple refuses the notary
 # credentials (an account-agreement problem, not a build one), and unsigned
@@ -97,9 +99,55 @@ jobs:
           fi
           echo "skip=false" >> "$GITHUB_OUTPUT"
 
+  # One release binary per architecture, compiled in parallel. Building both
+  # in one job ran two cold release builds back to back (~25 min each, most of
+  # it the single orbit-pi crate), which pushed the job toward its timeout.
+  # Both legs run on the arm64 image; x86_64 is cross-compiled there, exactly
+  # as the single job did before.
+  macos-build:
+    name: macOS build (${{ matrix.target }})
+    needs: version
+    if: needs.version.outputs.skip != 'true'
+    strategy:
+      fail-fast: true
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      # Baked into the binary by build.rs; empty leaves the updater dormant.
+      ORBIT_UPDATE_PUBLIC_KEY: ${{ secrets.ORBIT_UPDATE_PUBLIC_KEY }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust (${{ matrix.target }})
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      # One cache per architecture: the two legs build disjoint target dirs,
+      # and a shared key would let whichever saves last evict the other.
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release -p orbit-pi --target ${{ matrix.target }}
+
+      - name: Upload binary
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos-bin-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/orbit-pi
+          if-no-files-found: error
+          # Only the packaging job below reads it.
+          retention-days: 1
+
   macos:
     name: macOS (signed + notarized DMGs)
-    needs: version
+    needs: [version, macos-build]
     if: needs.version.outputs.skip != 'true'
     runs-on: macos-latest
     outputs:
@@ -107,25 +155,27 @@ jobs:
       # notarized + stapled; '0' when Apple refused them; empty for an
       # unsigned build.
       notarized: ${{ steps.notary.outputs.notarized }}
-    # Two packages (arm64 and universal) plus their notarization round-trips
-    # legitimately run long; the reference pipeline allows 90 minutes and so
-    # do we.
-    timeout-minutes: 90
+    # No compiling here: lipo, two packages (arm64 and universal) and their
+    # notarization round-trips, each normally under a minute.
+    timeout-minutes: 45
     env:
       VERSION: ${{ needs.version.outputs.version }}
-      # Baked into the binary by build.rs; empty leaves the updater dormant.
-      ORBIT_UPDATE_PUBLIC_KEY: ${{ secrets.ORBIT_UPDATE_PUBLIC_KEY }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install Rust (arm64 + x86_64)
-        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      # make-dmg.sh with SKIP_BUILD=1 expects each binary at
+      # target/<triple>/release/orbit-pi, where a local cargo build puts it.
+      - name: Download arm64 binary
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          toolchain: stable
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          name: macos-bin-aarch64-apple-darwin
+          path: target/aarch64-apple-darwin/release
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Download x86_64 binary
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: macos-bin-x86_64-apple-darwin
+          path: target/x86_64-apple-darwin/release
 
       - name: Import Developer ID certificate
         env:
@@ -148,9 +198,10 @@ jobs:
           security default-keychain -s "$KEYCHAIN"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           # A freshly created keychain re-locks after 5 minutes of inactivity.
-          # The release build spends ~11 minutes in cargo first, so without this
-          # `codesign` later blocks on the locked keychain waiting for a prompt
-          # that never comes, and the job dies on its timeout.
+          # The binaries are built in macos-build now, but a slow notarization
+          # round-trip can still keep the keychain idle that long, and then
+          # `codesign` blocks on the locked keychain waiting for a prompt that
+          # never comes, and the job dies on its timeout.
           security set-keychain-settings -t 3600 -u "$KEYCHAIN"
           security list-keychains -d user -s "$KEYCHAIN" \
             $(security list-keychains -d user | sed 's/[[:space:]]*"//g')
@@ -196,8 +247,11 @@ jobs:
           fi
 
       # `both` emits the arm64 and universal DMGs plus their updater
-      # archives; each is signed, notarized, and stapled.
-      - name: Build, sign, notarize, staple
+      # archives; each is signed, notarized, and stapled. SKIP_BUILD=1
+      # packages the binaries macos-build produced instead of compiling.
+      - name: Package, sign, notarize, staple
+        env:
+          SKIP_BUILD: '1'
         run: ./scripts/make-dmg.sh both
 
       - name: Verify notarization
@@ -338,10 +392,15 @@ jobs:
   draft-release:
     name: Draft GitHub release
     needs: [version, macos, linux, windows]
+    # macOS is the primary platform: a release without its DMGs and updater
+    # archives is not shippable, and a published release is never rebuilt — so
+    # a macOS failure must not cut the tag. Linux and Windows stay
+    # best-effort (`continue-on-error`) and only contribute what they built.
     if: >-
       always()
       && needs.version.result == 'success'
       && needs.version.outputs.skip != 'true'
+      && needs.macos.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -360,6 +419,13 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+
+      # The macos-bin-* artifacts are the bare per-architecture binaries the
+      # macOS packaging job consumed; the DMGs and updater archives already
+      # carry them. Everything left in artifacts/ is uploaded to the release,
+      # so drop them here.
+      - name: Drop intermediate macOS binaries
+        run: rm -f artifacts/orbit-pi
 
       # The tag is cut from the app version, not by hand, and only once every
       # build has had its chance, so it always points at a commit whose

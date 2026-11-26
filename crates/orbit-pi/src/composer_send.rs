@@ -509,6 +509,49 @@ mod tests {
         });
     }
 
+    /// The line jump is the primary modifier's job on macOS only. Off macOS the
+    /// primary modifier is `ctrl`, so `secondary-left` *is* Ctrl+Left: the
+    /// platform-specific block must land after it to win by registration order.
+    #[gpui::test]
+    fn ctrl_arrow_moves_by_word_off_macos(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            crate::bind_keys(cx);
+            for context in ["Composer", "Editor"] {
+                // The ends of the line stay reachable either way.
+                assert!(bound_action(cx, "home", context).is_some(), "{context}");
+                assert!(bound_action(cx, "end", context).is_some(), "{context}");
+                if cfg!(target_os = "macos") {
+                    assert!(
+                        bound_action(cx, "cmd-left", context)
+                            .unwrap()
+                            .as_any()
+                            .is::<crate::LineLeft>(),
+                        "{context}"
+                    );
+                    assert!(
+                        bound_action(cx, "ctrl-left", context).is_none(),
+                        "{context}"
+                    );
+                } else {
+                    assert!(
+                        bound_action(cx, "ctrl-left", context)
+                            .unwrap()
+                            .as_any()
+                            .is::<crate::WordLeft>(),
+                        "{context}"
+                    );
+                    assert!(
+                        bound_action(cx, "ctrl-shift-right", context)
+                            .unwrap()
+                            .as_any()
+                            .is::<crate::SelectWordRight>(),
+                        "{context}"
+                    );
+                }
+            }
+        });
+    }
+
     #[test]
     fn idle_hints_show_only_send() {
         for default in [SendMode::FollowUp, SendMode::Steer] {
