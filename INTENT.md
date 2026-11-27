@@ -17,7 +17,8 @@ the same architecture as Waku, scoped to pi only — with **every current featur
 - no browser, no webview, no Node.js daemon anywhere in the app
 - UI rendered by GPUI (the framework Zed is built on) on Metal
 - the pi CLI (`pi --mode rpc`) as the only agent runtime, spoken to over stdio JSONL
-- same sessions as the terminal (`~/.pi/agent/sessions/`), pi's own catalog, thinking levels, and persistence
+- same sessions as the terminal (pi's session store: `PI_CODING_AGENT_SESSION_DIR`, else the
+  agent directory — `PI_CODING_AGENT_DIR` or `~/.pi/agent` — plus `sessions/`), pi's own catalog, thinking levels, and persistence
 
 ## Decisions
 

@@ -1035,7 +1035,7 @@ impl ComposerInput {
         if self.is_composing() {
             return;
         }
-        self.select_to(self.next_word_boundary(self.selected_range.end), cx)
+        self.select_to(self.next_word_boundary(self.cursor_offset()), cx)
     }
 
     /// Cmd+Left / Cmd+Right: jump to the start/end of the wrapped row the
